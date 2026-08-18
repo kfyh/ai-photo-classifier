@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-[#121316] text-gray-200 font-sans antialiased select-none;
+    color-scheme: dark;
+  }
+}
+
+/* Custom sleek dark scrollbars for DAM interface */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #141519;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2a2d3a;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3b3f52;
+}
+
+/* Focus outline glow */
+.focus-ring {
+  @apply focus:outline-none focus:ring-2 focus:ring-purple-500/50;
+}
+
+/* Glassmorphism panel styling */
+.glass-panel {
+  background: rgba(26, 28, 35, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
