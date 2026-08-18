@@ -2,6 +2,7 @@ import React from 'react';
 import { CombinedPhotoData, PickStatus } from '../types';
 import { HistogramWidget } from './HistogramWidget';
 import { ChevronRight, ChevronLeft, Camera, Sliders, Star, Flag, XCircle, CheckCircle2, Sparkles, ExternalLink } from 'lucide-react';
+import { StarRating } from './StarRating';
 
 interface RightSidebarProps {
   isCollapsed: boolean;
@@ -89,7 +90,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                   <span>Pick Status:</span>
                   <div className="flex gap-1">
                     <button
-                      onClick={() => photo && onUpdateRating(photo.id, 'pick', rating?.star_rating || 0)}
+                      onClick={() => photo && onUpdateRating(photo.id, rating?.pick_status === 'pick' ? 'unflagged' : 'pick', rating?.star_rating || 0)}
                       className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition ${
                         rating?.pick_status === 'pick'
                           ? 'bg-green-600 text-white font-medium shadow-sm'
@@ -100,7 +101,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                       <span>Pick (P)</span>
                     </button>
                     <button
-                      onClick={() => photo && onUpdateRating(photo.id, 'reject', rating?.star_rating || 0)}
+                      onClick={() => photo && onUpdateRating(photo.id, rating?.pick_status === 'reject' ? 'unflagged' : 'reject', rating?.star_rating || 0)}
                       className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition ${
                         rating?.pick_status === 'reject'
                           ? 'bg-red-600 text-white font-medium shadow-sm'
@@ -115,23 +116,11 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
 
                 <div className="flex items-center justify-between text-[11px] text-gray-400 pt-1">
                   <span>Star Rating:</span>
-                  <div className="flex gap-0.5">
-                    {[1, 2, 3, 4, 5].map(star => (
-                      <button
-                        key={star}
-                        onClick={() => photo && onUpdateRating(photo.id, rating?.pick_status || 'unflagged', star)}
-                        className="p-1 hover:scale-110 transition"
-                      >
-                        <Star
-                          className={`w-4 h-4 ${
-                            (rating?.star_rating || 0) >= star
-                              ? 'text-amber-400 fill-amber-400'
-                              : 'text-gray-600 hover:text-amber-300'
-                          }`}
-                        />
-                      </button>
-                    ))}
-                  </div>
+                  <StarRating
+                    rating={rating?.star_rating || 0}
+                    onRate={newRating => photo && onUpdateRating(photo.id, rating?.pick_status || 'unflagged', newRating)}
+                    size="md"
+                  />
                 </div>
               </div>
             </div>

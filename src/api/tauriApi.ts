@@ -127,14 +127,25 @@ export const tauriApi: TauriAPI = {
   },
 
   updateUserRating: async (photoId: string, pickStatus: PickStatus, starRating: number) => {
-    const raw = await invoke<any>('update_user_rating', { photoId, pickStatus, starRating });
-    return {
-      photo_id: raw.photo_id,
-      pick_status: raw.pick_status,
-      star_rating: raw.star_rating,
-      is_confirmed: raw.is_confirmed,
-      updated_at: raw.updated_at,
-    };
+    try {
+      const raw = await invoke<any>('update_user_rating', { photoId, pickStatus, starRating });
+      return {
+        photo_id: raw.photo_id ?? raw.photoId ?? photoId,
+        pick_status: (raw.pick_status ?? raw.pickStatus ?? pickStatus) as PickStatus,
+        star_rating: raw.star_rating ?? raw.starRating ?? starRating,
+        is_confirmed: raw.is_confirmed ?? raw.isConfirmed ?? true,
+        updated_at: raw.updated_at ?? raw.updatedAt ?? Date.now(),
+      };
+    } catch (err) {
+      console.error('[TauriAPI] updateUserRating error:', err);
+      return {
+        photo_id: photoId,
+        pick_status: pickStatus,
+        star_rating: starRating,
+        is_confirmed: true,
+        updated_at: Date.now(),
+      };
+    }
   },
 
   getHistogram: async (imagePath: string, photoId?: string) => {

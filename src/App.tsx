@@ -375,27 +375,40 @@ export const App: React.FC = () => {
 
   // Rating Update Handler
   const handleUpdateRating = useCallback(async (photoId: string, pickStatus: PickStatus, starRating: number) => {
+    // If the target photo is part of a multi-selection, apply rating update to all selected photos
+    const targetIds = selectedPhotoIds.has(photoId) && selectedPhotoIds.size > 1
+      ? Array.from(selectedPhotoIds)
+      : [photoId];
+
+    // 1. Optimistically update local React state immediately for instant UI response
+    setPhotos(prev => prev.map(p => {
+      if (targetIds.includes(p.photo.id)) {
+        return {
+          ...p,
+          userRating: {
+            ...p.userRating,
+            pick_status: pickStatus,
+            star_rating: starRating,
+            is_confirmed: true,
+            updated_at: Date.now(),
+          },
+        };
+      }
+      return p;
+    }));
+
+    // 2. Persist rating updates to backend DB if Tauri API is present
     if (window.api) {
-      const updated = await window.api.updateUserRating(photoId, pickStatus, starRating);
-      setPhotos(prev => prev.map(p => p.photo.id === photoId ? { ...p, userRating: updated } : p));
-    } else {
-      setPhotos(prev => prev.map(p => {
-        if (p.photo.id === photoId) {
-          return {
-            ...p,
-            userRating: {
-              ...p.userRating,
-              pick_status: pickStatus,
-              star_rating: starRating,
-              is_confirmed: true,
-              updated_at: Date.now(),
-            },
-          };
+      for (const id of targetIds) {
+        try {
+          const updated = await window.api.updateUserRating(id, pickStatus, starRating);
+          setPhotos(prev => prev.map(p => p.photo.id === id ? { ...p, userRating: updated } : p));
+        } catch (err) {
+          console.error('[App] Failed to update user rating in backend:', err);
         }
-        return p;
-      }));
+      }
     }
-  }, []);
+  }, [selectedPhotoIds]);
 
   // RawTherapee Exporter Handler
   const handleExportRawTherapee = async (photoPath: string, rating: number, pickStatus: PickStatus) => {
@@ -492,12 +505,22 @@ export const App: React.FC = () => {
 
       // Rating Keys (P, X, U, 0 to 5)
       if (selectedPhotoId) {
-        if (key === 'P') handleUpdateRating(selectedPhotoId, 'pick', selectedPhoto?.userRating.star_rating || 0);
-        if (key === 'X') handleUpdateRating(selectedPhotoId, 'reject', selectedPhoto?.userRating.star_rating || 0);
-        if (key === 'U') handleUpdateRating(selectedPhotoId, 'unflagged', selectedPhoto?.userRating.star_rating || 0);
+        const currentPick = selectedPhoto?.userRating.pick_status || 'unflagged';
+        const currentStar = selectedPhoto?.userRating.star_rating || 0;
+
+        if (key === 'P') {
+          handleUpdateRating(selectedPhotoId, currentPick === 'pick' ? 'unflagged' : 'pick', currentStar);
+        }
+        if (key === 'X') {
+          handleUpdateRating(selectedPhotoId, currentPick === 'reject' ? 'unflagged' : 'reject', currentStar);
+        }
+        if (key === 'U') {
+          handleUpdateRating(selectedPhotoId, 'unflagged', currentStar);
+        }
 
         if (['0', '1', '2', '3', '4', '5'].includes(e.key)) {
-          handleUpdateRating(selectedPhotoId, selectedPhoto?.userRating.pick_status || 'unflagged', Number(e.key));
+          const newStar = Number(e.key);
+          handleUpdateRating(selectedPhotoId, currentPick, currentStar === newStar ? 0 : newStar);
         }
       }
     };

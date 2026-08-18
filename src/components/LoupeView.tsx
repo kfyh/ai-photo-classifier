@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { CombinedPhotoData, PickStatus } from '../types';
-import { ZoomIn, ZoomOut, CheckCircle2, XCircle, Star, Info, ChevronLeft, ChevronRight, Loader2, HelpCircle } from 'lucide-react';
+import { ZoomIn, ZoomOut, CheckCircle2, XCircle, Info, ChevronLeft, ChevronRight, Loader2, HelpCircle } from 'lucide-react';
 import { getPhotoSrc } from '../utils/image';
+import { StarRating } from './StarRating';
 
 interface LoupeViewProps {
   selectedPhoto: CombinedPhotoData | null;
@@ -141,7 +142,7 @@ export const LoupeView: React.FC<LoupeViewProps> = ({
         {/* Pick & Reject Flags */}
         <div className="flex gap-1.5 border-r border-white/10 pr-3">
           <button
-            onClick={() => onUpdateRating(photo.id, 'pick', rating.star_rating)}
+            onClick={() => onUpdateRating(photo.id, rating.pick_status === 'pick' ? 'unflagged' : 'pick', rating.star_rating)}
             className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition ${
               rating.pick_status === 'pick'
                 ? 'bg-green-600 text-white shadow-lg'
@@ -153,7 +154,7 @@ export const LoupeView: React.FC<LoupeViewProps> = ({
           </button>
 
           <button
-            onClick={() => onUpdateRating(photo.id, 'reject', rating.star_rating)}
+            onClick={() => onUpdateRating(photo.id, rating.pick_status === 'reject' ? 'unflagged' : 'reject', rating.star_rating)}
             className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition ${
               rating.pick_status === 'reject'
                 ? 'bg-red-600 text-white shadow-lg'
@@ -165,24 +166,12 @@ export const LoupeView: React.FC<LoupeViewProps> = ({
           </button>
         </div>
 
-        {/* Star Rating Buttons */}
-        <div className="flex gap-1">
-          {[1, 2, 3, 4, 5].map(star => (
-            <button
-              key={star}
-              onClick={() => onUpdateRating(photo.id, rating.pick_status, star)}
-              className="p-1 hover:scale-125 transition"
-            >
-              <Star
-                className={`w-5 h-5 ${
-                  rating.star_rating >= star
-                    ? 'text-amber-400 fill-amber-400'
-                    : 'text-gray-600 hover:text-amber-300'
-                }`}
-              />
-            </button>
-          ))}
-        </div>
+        {/* Interactive Star Rating Controls */}
+        <StarRating
+          rating={rating.star_rating}
+          onRate={newRating => onUpdateRating(photo.id, rating.pick_status, newRating)}
+          size="lg"
+        />
       </div>
     </div>
   );

@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { CombinedPhotoData, PickStatus } from '../types';
-import { X, ZoomIn, ZoomOut, CheckCircle2, XCircle, Star, Sparkles, Trophy, Trash2 } from 'lucide-react';
+import { X, ZoomIn, ZoomOut, CheckCircle2, XCircle, Sparkles, Trophy, Trash2 } from 'lucide-react';
 import { getPhotoSrc } from '../utils/image';
+import { StarRating } from './StarRating';
 
 interface CompareViewProps {
   candidates: CombinedPhotoData[];
@@ -171,11 +172,11 @@ export const CompareView: React.FC<CompareViewProps> = ({
 
                   {/* Card Bottom Quick Actions */}
                   <div className="h-10 bg-[#1a1c23] px-3 flex items-center justify-between border-t border-[#2a2d3a]">
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1.5">
                       <button
                         onClick={e => {
                           e.stopPropagation();
-                          onUpdateRating(photo.id, 'pick', rating.star_rating);
+                          onUpdateRating(photo.id, rating.pick_status === 'pick' ? 'unflagged' : 'pick', rating.star_rating);
                         }}
                         className={`p-1.5 rounded transition ${
                           rating.pick_status === 'pick'
@@ -190,7 +191,7 @@ export const CompareView: React.FC<CompareViewProps> = ({
                       <button
                         onClick={e => {
                           e.stopPropagation();
-                          onUpdateRating(photo.id, 'reject', rating.star_rating);
+                          onUpdateRating(photo.id, rating.pick_status === 'reject' ? 'unflagged' : 'reject', rating.star_rating);
                         }}
                         className={`p-1.5 rounded transition ${
                           rating.pick_status === 'reject'
@@ -201,6 +202,12 @@ export const CompareView: React.FC<CompareViewProps> = ({
                       >
                         <XCircle className="w-3.5 h-3.5" />
                       </button>
+
+                      <StarRating
+                        rating={rating.star_rating}
+                        onRate={newRating => onUpdateRating(photo.id, rating.pick_status, newRating)}
+                        size="sm"
+                      />
                     </div>
 
                     <button

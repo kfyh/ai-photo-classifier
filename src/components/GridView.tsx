@@ -1,7 +1,8 @@
 import React from 'react';
 import { CombinedPhotoData, PickStatus } from '../types';
-import { CheckCircle2, XCircle, Star, Sparkles, Image as ImageIcon } from 'lucide-react';
+import { CheckCircle2, XCircle, Sparkles, Image as ImageIcon } from 'lucide-react';
 import { getPhotoSrc } from '../utils/image';
+import { StarRating } from './StarRating';
 
 interface GridViewProps {
   photos: CombinedPhotoData[];
@@ -123,31 +124,13 @@ export const GridView: React.FC<GridViewProps> = ({
                     </button>
                   </div>
 
-                  {/* 5-Star Rating Buttons */}
-                  <div className="flex items-center gap-0.5 bg-black/50 backdrop-blur-sm px-1.5 py-0.5 rounded-md border border-white/10">
-                    {[1, 2, 3, 4, 5].map(star => (
-                      <button
-                        key={star}
-                        onClick={e => {
-                          e.stopPropagation();
-                          onUpdateRating(
-                            photo.id,
-                            rating.pick_status,
-                            rating.star_rating === star ? 0 : star
-                          );
-                        }}
-                        className="p-0.5 hover:scale-125 transition"
-                        title={`Set ${star} Star`}
-                      >
-                        <Star
-                          className={`w-3 h-3 ${
-                            rating.star_rating >= star
-                              ? 'text-amber-400 fill-amber-400'
-                              : 'text-gray-500 hover:text-amber-300'
-                          }`}
-                        />
-                      </button>
-                    ))}
+                  {/* Interactive 5-Star Rating Control */}
+                  <div className="bg-black/50 backdrop-blur-sm px-1.5 py-0.5 rounded-md border border-white/10">
+                    <StarRating
+                      rating={rating.star_rating}
+                      onRate={newRating => onUpdateRating(photo.id, rating.pick_status, newRating)}
+                      size="sm"
+                    />
                   </div>
                 </div>
               </div>
