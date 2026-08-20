@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
 pub struct FolderRecord {
     pub id: String,
     pub path: String,
@@ -23,6 +22,14 @@ pub struct PhotoRecord {
     pub date_taken: Option<i64>,
     pub created_at: i64,
     pub thumbnail_path: Option<String>,
+    #[serde(default = "default_completed_status")]
+    pub processing_status: String, // "pending", "processing", "completed", "error"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub histogram_json: Option<String>,
+}
+
+fn default_completed_status() -> String {
+    "completed".to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -70,7 +77,6 @@ pub struct AIPrediction {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
 pub struct CombinedPhotoData {
     pub photo: PhotoRecord,
     pub exif: Option<PhotoExif>,
@@ -80,12 +86,13 @@ pub struct CombinedPhotoData {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
 pub struct ImportProgressPayload {
     pub folder_id: String,
     pub current: usize,
     pub total: usize,
     pub photo: Option<CombinedPhotoData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub photos: Option<Vec<CombinedPhotoData>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -95,7 +102,7 @@ pub struct ModelSnapshot {
     pub model_name: String,
     pub version: i32,
     pub trained_samples_count: i32,
-    pub pick_weights: Vec<f32>,
+    pub pick_weights: Vec<Vec<f32>>,
     pub rating_weights: Vec<Vec<f32>>,
     pub created_at: i64,
 }
@@ -115,7 +122,14 @@ pub struct AccuracyLog {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
+pub struct HistogramData {
+    pub red: Vec<u32>,
+    pub green: Vec<u32>,
+    pub blue: Vec<u32>,
+    pub luma: Vec<u32>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MLModelOption {
     pub id: String,
     pub name: String,
@@ -124,12 +138,4 @@ pub struct MLModelOption {
     pub embedding_dim: usize,
     pub requires_api_key: bool,
     pub is_offline_capable: bool,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct HistogramData {
-    pub red: Vec<u32>,
-    pub green: Vec<u32>,
-    pub blue: Vec<u32>,
-    pub luma: Vec<u32>,
 }

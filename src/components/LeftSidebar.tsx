@@ -1,6 +1,14 @@
 import React from 'react';
 import { FolderRecord } from '../types';
-import { FolderOpen, Folder, ChevronLeft, ChevronRight, Image as ImageIcon, Sparkles, Trash2 } from 'lucide-react';
+import {
+  FolderOpen,
+  Folder,
+  ChevronLeft,
+  ChevronRight,
+  Image as ImageIcon,
+  Sparkles,
+  Trash2,
+} from 'lucide-react';
 
 interface LeftSidebarProps {
   isCollapsed: boolean;
@@ -57,7 +65,9 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
       <div className="p-3 border-b border-[#2a2d3a] flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Folder className="w-4 h-4 text-purple-400" />
-          <span className="text-xs font-semibold tracking-wider text-gray-300 uppercase">Folders</span>
+          <span className="text-xs font-semibold tracking-wider text-gray-300 uppercase">
+            Folders
+          </span>
         </div>
         <div className="flex items-center gap-1">
           {onClearDatabase && (
@@ -96,7 +106,9 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
           <div className="p-4 text-center text-xs text-gray-500 space-y-2">
             <ImageIcon className="w-8 h-8 mx-auto text-gray-600 opacity-60" />
             <p>No shoot folders imported yet.</p>
-            <p className="text-[11px] text-gray-600">Click "Open / Select Folder" above to start culling.</p>
+            <p className="text-[11px] text-gray-600">
+              Click "Open / Select Folder" above to start culling.
+            </p>
           </div>
         ) : (
           folders.map(folder => {
@@ -112,12 +124,16 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                 }`}
               >
                 <div className="flex items-center gap-2 overflow-hidden">
-                  <Folder className={`w-4 h-4 flex-shrink-0 ${isActive ? 'text-purple-400' : 'text-gray-400'}`} />
+                  <Folder
+                    className={`w-4 h-4 flex-shrink-0 ${isActive ? 'text-purple-400' : 'text-gray-400'}`}
+                  />
                   <span className="truncate">{folder.name}</span>
                 </div>
-                <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-mono flex-shrink-0 ${
-                  isActive ? 'bg-purple-800/60 text-purple-200' : 'bg-[#141519] text-gray-500'
-                }`}>
+                <span
+                  className={`text-[10px] px-1.5 py-0.5 rounded-full font-mono flex-shrink-0 ${
+                    isActive ? 'bg-purple-800/60 text-purple-200' : 'bg-[#141519] text-gray-500'
+                  }`}
+                >
                   {folder.photoCount || 0}
                 </span>
               </button>

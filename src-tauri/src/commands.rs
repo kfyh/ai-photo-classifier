@@ -76,6 +76,113 @@ pub async fn get_folders(state: State<'_, AppState>) -> Result<Vec<FolderRecord>
     state.db.get_folders().map_err(|e| e.to_string())
 }
 
+/// Stage 2 Worker: Deep Metadata (EXIF, Quality, Histogram) and AI Neural Predictions
+fn spawn_pending_processing_worker(
+    app: AppHandle,
+    db: Arc<AppDatabase>,
+    pipeline: Arc<ImagePipeline>,
+    ml: Arc<Mutex<MLEngine>>,
+    folder_id: String,
+) {
+    tokio::task::spawn_blocking(move || {
+        let pending = match db.get_pending_photos_in_folder(&folder_id) {
+            Ok(list) => list,
+            Err(_) => return,
+        };
+
+        if pending.is_empty() {
+            let _ = app.emit("import-complete", serde_json::json!({ "folderId": folder_id, "total": 0 }));
+            return;
+        }
+
+        let total = pending.len();
+        let chunk_size = 12;
+
+        println!(
+            "[Stage 2] Commencing deep metadata & AI processing for {} photos in folder {}",
+            total, folder_id
+        );
+
+        for (chunk_idx, chunk) in pending.chunks(chunk_size).enumerate() {
+            let processed_chunk: Vec<(CombinedPhotoData, Option<HistogramData>)> = chunk
+                .par_iter()
+                .map(|photo| {
+                    let photo_id = &photo.id;
+                    let file_path = &photo.file_path;
+                    let res = pipeline.process_photo_single_pass(file_path, photo_id);
+
+                    let final_thumb = if !res.thumb_path.is_empty() {
+                        Some(res.thumb_path)
+                    } else if photo.thumbnail_path.as_ref().map(|p| !p.is_empty()).unwrap_or(false) {
+                        photo.thumbnail_path.clone()
+                    } else {
+                        let cache_thumb = pipeline.get_cache_dir().join(format!("{}_thumb.webp", photo_id));
+                        if cache_thumb.exists() {
+                            Some(cache_thumb.to_string_lossy().to_string())
+                        } else {
+                            photo.thumbnail_path.clone()
+                        }
+                    };
+
+                    let updated_photo = PhotoRecord {
+                        id: photo_id.clone(),
+                        folder_id: folder_id.clone(),
+                        file_path: file_path.clone(),
+                        file_name: photo.file_name.clone(),
+                        file_size: if res.file_size > 0 { res.file_size } else { photo.file_size },
+                        width: if res.width > 0 { res.width } else if photo.width > 0 { photo.width } else { 400 },
+                        height: if res.height > 0 { res.height } else if photo.height > 0 { photo.height } else { 400 },
+                        date_taken: photo.date_taken,
+                        created_at: photo.created_at,
+                        thumbnail_path: final_thumb,
+                        processing_status: "completed".to_string(),
+                        histogram_json: serde_json::to_string(&res.histogram).ok(),
+                    };
+
+                    let ml_guard = ml.lock().unwrap();
+                    let pred = ml_guard.predict(&db, photo_id, file_path, Some(&res.quality));
+                    drop(ml_guard);
+
+                    let current_rating = db.get_user_rating(photo_id).ok().flatten().unwrap_or(UserRating {
+                        photo_id: photo_id.clone(),
+                        pick_status: "unflagged".to_string(),
+                        star_rating: 0,
+                        is_confirmed: false,
+                        updated_at: photo.created_at,
+                    });
+
+                    let combined = CombinedPhotoData {
+                        photo: updated_photo,
+                        exif: Some(res.exif),
+                        user_rating: current_rating,
+                        quality: Some(res.quality),
+                        ai_prediction: Some(pred),
+                    };
+
+                    (combined, Some(res.histogram))
+                })
+                .collect();
+
+            // 1. Single atomic batch update to database
+            let _ = db.update_photos_processed_batch(&processed_chunk);
+
+            // 2. Emit 1 batched event to prevent webview event flooding
+            let photos_batch: Vec<CombinedPhotoData> = processed_chunk.into_iter().map(|(c, _)| c).collect();
+            let global_idx = ((chunk_idx + 1) * chunk_size).min(total);
+            let payload = ImportProgressPayload {
+                folder_id: folder_id.clone(),
+                current: global_idx,
+                total,
+                photo: photos_batch.last().cloned(),
+                photos: Some(photos_batch),
+            };
+            let _ = app.emit("import-progress", payload);
+        }
+
+        let _ = app.emit("import-complete", serde_json::json!({ "folderId": folder_id, "total": total }));
+    });
+}
+
 #[tauri::command]
 pub async fn import_folder(
     app: AppHandle,
@@ -113,135 +220,143 @@ pub async fn import_folder(
 
     let folder_id = folder.id.clone();
     let scanned_files = pipeline.scan_folder(&folder_path);
-    let total = scanned_files.len();
+    let total_scanned = scanned_files.len();
 
-    tokio::task::spawn_blocking(move || {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
 
-        let first_batch_size = 24.min(total);
+    // Pre-insert scanned files in 500-item atomic batch transactions (<15ms for 3,000 files)
+    let mut initial_records = Vec::with_capacity(total_scanned);
+    for file_path_buf in &scanned_files {
+        let file_path = file_path_buf.to_string_lossy().to_string();
+        let file_name = file_path_buf
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("image")
+            .to_string();
+        let new_id = Uuid::new_v4().to_string();
+        initial_records.push(PhotoRecord {
+            id: new_id,
+            folder_id: folder_id.clone(),
+            file_path,
+            file_name,
+            file_size: 0,
+            width: 400,
+            height: 400,
+            date_taken: Some(now),
+            created_at: now,
+            thumbnail_path: None,
+            processing_status: "pending".to_string(),
+            histogram_json: None,
+        });
+    }
 
-        // --- Phase 1: Rapid Thumbnail-Only Generation (<50ms Instant Grid View Fill) ---
-        let mut first_combined_list = Vec::new();
-        for (idx, file_path_buf) in scanned_files.iter().take(first_batch_size).enumerate() {
-            let file_path = file_path_buf.to_string_lossy().to_string();
-            let file_name = file_path_buf
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("image")
-                .to_string();
-            let photo_id = Uuid::new_v4().to_string();
+    for chunk in initial_records.chunks(500) {
+        let _ = db.insert_photos_batch(chunk);
+    }
 
-            // FAST PATH: Generate WebP thumbnail ONLY from EXIF embedded bytes (<2ms), zero full image decodes
-            let (thumb_path, w, h, file_size) = pipeline.generate_thumbnail_fast_exif_only(&file_path, &photo_id);
+    tokio::task::spawn_blocking({
+        let db = db.clone();
+        let pipeline = pipeline.clone();
+        let app = app.clone();
+        let folder_id = folder_id.clone();
 
-            let photo_record = PhotoRecord {
-                id: photo_id.clone(),
-                folder_id: folder_id.clone(),
-                file_path: file_path.clone(),
-                file_name,
-                file_size,
-                width: w,
-                height: h,
-                date_taken: Some(now),
-                created_at: now,
-                thumbnail_path: if thumb_path.is_empty() { None } else { Some(thumb_path) },
-            };
+        move || {
+            // =========================================================================
+            // Stage 1: Rapid Thumbnail Generation & Registration Pass for ALL Images
+            // =========================================================================
+            println!(
+                "[Stage 1] Preparing rapid thumbnails for all {} images in folder {}",
+                total_scanned, folder_id
+            );
 
-            let combined = CombinedPhotoData {
-                photo: photo_record,
-                exif: None,
-                user_rating: UserRating {
-                    photo_id: photo_id.clone(),
-                    pick_status: "unflagged".to_string(),
-                    star_rating: 0,
-                    is_confirmed: false,
-                    updated_at: now,
-                },
-                quality: None,
-                ai_prediction: None,
-            };
+            let chunk_size = 12;
+            for (chunk_idx, chunk_paths) in scanned_files.chunks(chunk_size).enumerate() {
+                let batch: Vec<CombinedPhotoData> = chunk_paths
+                    .par_iter()
+                    .map(|file_path_buf| {
+                        let file_path = file_path_buf.to_string_lossy().to_string();
 
-            first_combined_list.push(combined.clone());
+                        let (photo_id, mut photo_record) = if let Ok(Some(existing)) = db.get_photo_by_path(&file_path) {
+                            (existing.id.clone(), existing)
+                        } else {
+                            let file_name = file_path_buf
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("image")
+                                .to_string();
+                            let new_id = Uuid::new_v4().to_string();
 
-            let payload = ImportProgressPayload {
-                folder_id: folder_id.clone(),
-                current: idx + 1,
-                total,
-                photo: Some(combined),
-            };
-            let _ = app.emit("import-progress", payload);
-        }
+                            let record = PhotoRecord {
+                                id: new_id.clone(),
+                                folder_id: folder_id.clone(),
+                                file_path: file_path.clone(),
+                                file_name,
+                                file_size: 0,
+                                width: 400,
+                                height: 400,
+                                date_taken: Some(now),
+                                created_at: now,
+                                thumbnail_path: None,
+                                processing_status: "pending".to_string(),
+                                histogram_json: None,
+                            };
+                            (new_id, record)
+                        };
 
-        let _ = db.insert_combined_photos_batch(&first_combined_list);
+                        let needs_thumb = photo_record.thumbnail_path.as_ref()
+                            .map(|p| !Path::new(p).exists())
+                            .unwrap_or(true);
 
-        // --- Phase 2: Parallel Background Processing (Remaining Thumbnails + Deep Metadata & AI for ALL Photos) ---
-        let chunk_size = 20;
+                        if needs_thumb {
+                            let (thumb_path, w, h, file_size) = pipeline.generate_thumbnail_fast_exif_only(&file_path, &photo_id);
+                            if !thumb_path.is_empty() {
+                                photo_record.thumbnail_path = Some(thumb_path);
+                            }
+                            if w > 0 { photo_record.width = w; }
+                            if h > 0 { photo_record.height = h; }
+                            if file_size > 0 { photo_record.file_size = file_size; }
+                        }
 
-        for (chunk_idx, chunk) in scanned_files.chunks(chunk_size).enumerate() {
-            let processed_chunk: Vec<CombinedPhotoData> = chunk
-                .par_iter()
-                .map(|file_path_buf| {
-                    let file_path = file_path_buf.to_string_lossy().to_string();
-                    let file_name = file_path_buf
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("image")
-                        .to_string();
-
-                    let photo_id = Uuid::new_v4().to_string();
-                    let res = pipeline.process_photo_single_pass(&file_path, &photo_id);
-
-                    let photo_record = PhotoRecord {
-                        id: photo_id.clone(),
-                        folder_id: folder_id.clone(),
-                        file_path: file_path.clone(),
-                        file_name,
-                        file_size: res.file_size,
-                        width: res.width,
-                        height: res.height,
-                        date_taken: Some(now),
-                        created_at: now,
-                        thumbnail_path: if res.thumb_path.is_empty() { None } else { Some(res.thumb_path) },
-                    };
-
-                    let ml_guard = ml.lock().unwrap();
-                    let pred = ml_guard.predict(&db, &photo_id, &file_path, Some(&res.quality));
-                    drop(ml_guard);
-
-                    CombinedPhotoData {
-                        photo: photo_record,
-                        exif: Some(res.exif),
-                        user_rating: UserRating {
+                        let current_rating = db.get_user_rating(&photo_id).ok().flatten().unwrap_or(UserRating {
                             photo_id: photo_id.clone(),
                             pick_status: "unflagged".to_string(),
                             star_rating: 0,
                             is_confirmed: false,
                             updated_at: now,
-                        },
-                        quality: Some(res.quality),
-                        ai_prediction: Some(pred),
-                    }
-                })
-                .collect();
+                        });
 
-            let _ = db.insert_combined_photos_batch(&processed_chunk);
+                        CombinedPhotoData {
+                            photo: photo_record,
+                            exif: None,
+                            user_rating: current_rating,
+                            quality: None,
+                            ai_prediction: None,
+                        }
+                    })
+                    .collect();
 
-            for (idx_in_chunk, combined) in processed_chunk.into_iter().enumerate() {
-                let global_idx = chunk_idx * chunk_size + idx_in_chunk + 1;
+                let records_to_save: Vec<PhotoRecord> = batch.iter().map(|c| c.photo.clone()).collect();
+                let _ = db.insert_photos_batch(&records_to_save);
+
+                let global_idx = ((chunk_idx + 1) * chunk_size).min(total_scanned);
                 let payload = ImportProgressPayload {
                     folder_id: folder_id.clone(),
                     current: global_idx,
-                    total,
-                    photo: Some(combined),
+                    total: total_scanned,
+                    photo: batch.last().cloned(),
+                    photos: Some(batch),
                 };
                 let _ = app.emit("import-progress", payload);
             }
-        }
 
-        let _ = app.emit("import-complete", serde_json::json!({ "folderId": folder_id, "total": total }));
+            // =========================================================================
+            // Stage 2: Deep Metadata, EXIF, Quality & AI Neural Predictions
+            // =========================================================================
+            spawn_pending_processing_worker(app, db, pipeline, ml, folder_id);
+        }
     });
 
     Ok(folder)
@@ -249,15 +364,35 @@ pub async fn import_folder(
 
 #[tauri::command]
 pub async fn get_photos_in_folder(
+    app: AppHandle,
     state: State<'_, AppState>,
     folder_id: String,
 ) -> Result<Vec<CombinedPhotoData>, String> {
-    state.db.get_photos_in_folder(&folder_id).map_err(|e| e.to_string())
+    let photos = state.db.get_photos_in_folder(&folder_id).map_err(|e| e.to_string())?;
+
+    // Check if any photos in this folder are missing metadata processing
+    if let Ok(pending) = state.db.get_pending_photos_in_folder(&folder_id) {
+        if !pending.is_empty() {
+            println!(
+                "[Processing Queue] Resuming background processing for {} pending photos in folder {}",
+                pending.len(),
+                folder_id
+            );
+            spawn_pending_processing_worker(
+                app,
+                state.db.clone(),
+                state.image_pipeline.clone(),
+                state.ml_engine.clone(),
+                folder_id,
+            );
+        }
+    }
+
+    Ok(photos)
 }
 
 #[tauri::command]
 pub async fn update_user_rating(
-    _app: AppHandle,
     state: State<'_, AppState>,
     photo_id: String,
     pick_status: String,
@@ -268,13 +403,14 @@ pub async fn update_user_rating(
         .update_user_rating(&photo_id, &pick_status, star_rating)
         .map_err(|e| e.to_string())?;
 
-    // Auto-retrain trigger on every 10 confirmed ratings
-    if let Ok(confirmed_count) = state.db.get_confirmed_ratings_count() {
-        if confirmed_count > 0 && confirmed_count % 10 == 0 {
-            let db = state.db.clone();
-            let ml = state.ml_engine.clone();
-            tokio::task::spawn_blocking(move || {
-                if let Ok(mut guard) = ml.lock() {
+    // Auto-retrain if we have enough samples and confirmed updates
+    if let Ok(confirmed) = state.db.get_confirmed_training_data("local_onnx", "mobilenet_v3") {
+        if confirmed.len() >= 10 {
+            tokio::task::spawn_blocking({
+                let db = state.db.clone();
+                let ml = state.ml_engine.clone();
+                move || {
+                    let mut guard = ml.lock().unwrap();
                     let _ = guard.retrain(&db);
                 }
             });
@@ -290,7 +426,22 @@ pub async fn get_histogram(
     image_path: String,
     photo_id: Option<String>,
 ) -> Result<HistogramData, String> {
-    Ok(state.image_pipeline.calculate_histogram(&image_path, photo_id.as_deref()))
+    // 1. Fast path: Check SQLite cache first for instant response
+    if let Some(ref pid) = photo_id {
+        if let Ok(Some(cached)) = state.db.get_cached_histogram(pid) {
+            return Ok(cached);
+        }
+    }
+    if let Ok(Some(cached)) = state.db.get_cached_histogram_by_path(&image_path) {
+        return Ok(cached);
+    }
+
+    // 2. Slow path: Calculate from image & store in DB
+    let hist = state.image_pipeline.calculate_histogram(&image_path, photo_id.as_deref());
+    if let Some(ref pid) = photo_id {
+        let _ = state.db.save_histogram(pid, &hist);
+    }
+    Ok(hist)
 }
 
 #[tauri::command]
@@ -321,9 +472,16 @@ pub async fn set_active_model(
 
 #[tauri::command]
 pub async fn retrain_ai(state: State<'_, AppState>) -> Result<RetrainResult, String> {
-    let mut guard = state.ml_engine.lock().unwrap();
-    let (log, snapshot_id) = guard.retrain(&state.db)?;
-    Ok(RetrainResult { log, snapshot_id })
+    let db = state.db.clone();
+    let ml = state.ml_engine.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let mut guard = ml.lock().unwrap();
+        let (log, snapshot_id) = guard.retrain(&db)?;
+        Ok(RetrainResult { log, snapshot_id })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -332,8 +490,6 @@ pub async fn get_accuracy_logs(state: State<'_, AppState>) -> Result<Vec<Accurac
 }
 
 #[tauri::command]
-pub async fn clear_database(state: State<'_, AppState>) -> Result<bool, String> {
-    state.db.clear_database().map_err(|e| e.to_string())?;
-    state.image_pipeline.get_cache_dir();
-    Ok(true)
+pub async fn clear_database(state: State<'_, AppState>) -> Result<(), String> {
+    state.db.clear_database().map_err(|e| e.to_string())
 }

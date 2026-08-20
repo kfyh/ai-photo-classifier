@@ -1,5 +1,13 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
-import { CombinedPhotoData, FilterSettings, FolderRecord, MLModelOption, PickStatus, ViewMode } from './types';
+import {
+  CombinedPhotoData,
+  FilterSettings,
+  FontSizeScale,
+  FolderRecord,
+  MLModelOption,
+  PickStatus,
+  ViewMode,
+} from './types';
 import { TopToolbar } from './components/TopToolbar';
 import { LeftSidebar } from './components/LeftSidebar';
 import { RightSidebar } from './components/RightSidebar';
@@ -8,6 +16,15 @@ import { LoupeView } from './components/LoupeView';
 import { CompareView } from './components/CompareView';
 import { StatsDashboard } from './components/StatsDashboard';
 import { Filmstrip } from './components/Filmstrip';
+import {
+  applyUiScale,
+  getNextFontScale,
+  getPrevFontScale,
+  getThresholdMultiplier,
+  PICK_RANDOM_BASELINE,
+  RATING_RANDOM_BASELINE,
+  shouldShowAiSuggestion,
+} from './utils/ratingUtils';
 
 export const App: React.FC = () => {
   // Sidebar Collapse States
@@ -16,6 +33,16 @@ export const App: React.FC = () => {
 
   // Active View Mode
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
+
+  // Application Settings (Confidence multiplier: default 1.5x baseline)
+  const [confidenceThreshold, setConfidenceThreshold] = useState<number>(1.5);
+  const [uiFontScale, setUiFontScale] = useState<FontSizeScale>('sm');
+  const [colorblindMode, setColorblindMode] = useState<boolean>(true);
+
+  // Apply UI Font Scale whenever it changes
+  useEffect(() => {
+    applyUiScale(uiFontScale);
+  }, [uiFontScale]);
 
   // Data States
   const [folders, setFolders] = useState<(FolderRecord & { photoCount?: number })[]>([]);
@@ -42,7 +69,11 @@ export const App: React.FC = () => {
   const [activeModel, setActiveModel] = useState<MLModelOption | null>(null);
 
   // Background Import Progress State (x/y files ready)
-  const [importProgress, setImportProgress] = useState<{ folderId: string; current: number; total: number } | null>(null);
+  const [importProgress, setImportProgress] = useState<{
+    folderId: string;
+    current: number;
+    total: number;
+  } | null>(null);
 
   // Listen to background progress streams from Electron Main process
   useEffect(() => {
@@ -52,18 +83,32 @@ export const App: React.FC = () => {
       setImportProgress({ folderId: data.folderId, current: data.current, total: data.total });
 
       // Update folder list photo counts live in UI
-      setFolders(prev => prev.map(f => f.id === data.folderId ? { ...f, photoCount: data.total } : f));
+      setFolders(prev =>
+        prev.map(f => (f.id === data.folderId ? { ...f, photoCount: data.total } : f))
+      );
 
-      // Append photo to current view if active folder matches
-      if (data.photo) {
-        const newPhotoData = data.photo;
-        setPhotos(prev => {
-          const exists = prev.some(p => p.photo.id === newPhotoData.photo.id);
-          if (exists) {
-            return prev.map(p => p.photo.id === newPhotoData.photo.id ? newPhotoData : p);
-          }
-          return [...prev, newPhotoData];
-        });
+      // Append or update photos in current view if active folder matches
+      if (data.photo || data.photos) {
+        const incoming: CombinedPhotoData[] = data.photos || (data.photo ? [data.photo] : []);
+        if (incoming.length > 0) {
+          setPhotos(prev => {
+            const idMap = new Map<string, number>();
+            for (let i = 0; i < prev.length; i++) {
+              idMap.set(prev[i].photo.id, i);
+            }
+            const next = [...prev];
+            for (const item of incoming) {
+              const idx = idMap.get(item.photo.id);
+              if (idx !== undefined) {
+                next[idx] = item;
+              } else {
+                idMap.set(item.photo.id, next.length);
+                next.push(item);
+              }
+            }
+            return next;
+          });
+        }
       }
     });
 
@@ -113,20 +158,26 @@ export const App: React.FC = () => {
     ];
 
     if (window.api) {
-      window.api.getFolders().then(data => {
-        setFolders(data);
-        if (data.length > 0) {
-          setActiveFolderId(data[0].id);
-        }
-      }).catch(console.error);
+      window.api
+        .getFolders()
+        .then(data => {
+          setFolders(data);
+          if (data.length > 0) {
+            setActiveFolderId(data[0].id);
+          }
+        })
+        .catch(console.error);
 
-      window.api.getActiveModel().then(model => {
-        setActiveModel(model);
-        setAvailableModels(defaultModels);
-      }).catch(() => {
-        setActiveModel(defaultModels[0]);
-        setAvailableModels(defaultModels);
-      });
+      window.api
+        .getActiveModel()
+        .then(model => {
+          setActiveModel(model);
+          setAvailableModels(defaultModels);
+        })
+        .catch(() => {
+          setActiveModel(defaultModels[0]);
+          setAvailableModels(defaultModels);
+        });
     } else {
       // Browser fallback mode initialization
       setActiveModel(defaultModels[0]);
@@ -145,7 +196,8 @@ export const App: React.FC = () => {
       const samplePhotos: CombinedPhotoData[] = [1, 2, 3, 4, 5, 6].map(i => {
         const svgUri = `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600"><rect width="800" height="600" fill="%23${i % 2 === 0 ? '1e293b' : '1e1b4b'}"/><circle cx="${200 + i * 80}" cy="${200 + (i % 3) * 60}" r="${80 + i * 10}" fill="%23${i % 2 === 0 ? '38bdf8' : 'a855f7'}" opacity="0.8"/><text x="400" y="300" font-family="sans-serif" font-size="28" fill="%23f8fafc" text-anchor="middle">Demo Photo ${i}.jpg</text></svg>`;
         const photoId = `p_demo_${i}`;
-        const pickStatus: PickStatus = i === 1 || i === 4 ? 'pick' : i === 6 ? 'reject' : 'unflagged';
+        const pickStatus: PickStatus =
+          i === 1 || i === 4 ? 'pick' : i === 6 ? 'reject' : 'unflagged';
         const rating = (i % 5) + 1;
 
         return {
@@ -213,16 +265,19 @@ export const App: React.FC = () => {
     if (!activeFolderId) return;
 
     if (window.api) {
-      window.api.getPhotosInFolder(activeFolderId).then(data => {
-        setPhotos(data);
-        if (data.length > 0) {
-          setSelectedPhotoId(data[0].photo.id);
-          setSelectedPhotoIds(new Set([data[0].photo.id]));
-        } else {
-          setSelectedPhotoId(null);
-          setSelectedPhotoIds(new Set());
-        }
-      }).catch(console.error);
+      window.api
+        .getPhotosInFolder(activeFolderId)
+        .then(data => {
+          setPhotos(data);
+          if (data.length > 0) {
+            setSelectedPhotoId(data[0].photo.id);
+            setSelectedPhotoIds(new Set([data[0].photo.id]));
+          } else {
+            setSelectedPhotoId(null);
+            setSelectedPhotoIds(new Set());
+          }
+        })
+        .catch(console.error);
     }
   }, [activeFolderId]);
 
@@ -249,7 +304,17 @@ export const App: React.FC = () => {
         if (!target.files || target.files.length === 0) return;
 
         const files = Array.from(target.files);
-        const validExts = new Set(['.jpg', '.jpeg', '.png', '.webp', '.tiff', '.cr2', '.nef', '.arw', '.dng']);
+        const validExts = new Set([
+          '.jpg',
+          '.jpeg',
+          '.png',
+          '.webp',
+          '.tiff',
+          '.cr2',
+          '.nef',
+          '.arw',
+          '.dng',
+        ]);
         const imageFiles = files.filter(file => {
           const ext = '.' + file.name.split('.').pop()?.toLowerCase();
           return validExts.has(ext);
@@ -275,7 +340,8 @@ export const App: React.FC = () => {
         const newPhotos: CombinedPhotoData[] = imageFiles.map((file, idx) => {
           const photoId = `p_web_${Date.now()}_${idx}`;
           const objectUrl = URL.createObjectURL(file);
-          const predictedPick: PickStatus = idx % 3 === 0 ? 'pick' : idx % 5 === 0 ? 'reject' : 'unflagged';
+          const predictedPick: PickStatus =
+            idx % 3 === 0 ? 'pick' : idx % 5 === 0 ? 'reject' : 'unflagged';
           const predictedRating = (idx % 5) + 1;
 
           return {
@@ -349,8 +415,15 @@ export const App: React.FC = () => {
       const rating = item.userRating;
       const ai = item.aiPrediction;
 
-      if (filters.pickFilter !== 'all' && rating.pick_status !== filters.pickFilter) {
-        return false;
+      if (filters.pickFilter !== 'all') {
+        const isNoneFilter =
+          filters.pickFilter === 'none' || (filters.pickFilter as string) === 'unflagged';
+        const isPhotoNone = rating.pick_status === 'none' || rating.pick_status === 'unflagged';
+        if (isNoneFilter) {
+          if (!isPhotoNone) return false;
+        } else if (rating.pick_status !== filters.pickFilter) {
+          return false;
+        }
       }
       if (rating.star_rating < filters.minRating || rating.star_rating > filters.maxRating) {
         return false;
@@ -374,49 +447,125 @@ export const App: React.FC = () => {
   }, [photos, selectedPhotoId]);
 
   // Rating Update Handler
-  const handleUpdateRating = useCallback(async (photoId: string, pickStatus: PickStatus, starRating: number) => {
-    // If the target photo is part of a multi-selection, apply rating update to all selected photos
-    const targetIds = selectedPhotoIds.has(photoId) && selectedPhotoIds.size > 1
-      ? Array.from(selectedPhotoIds)
-      : [photoId];
+  const handleUpdateRating = useCallback(
+    async (photoId: string, pickStatus: PickStatus, starRating: number) => {
+      // If the target photo is part of a multi-selection, apply rating update to all selected photos
+      const targetIds =
+        selectedPhotoIds.has(photoId) && selectedPhotoIds.size > 1
+          ? Array.from(selectedPhotoIds)
+          : [photoId];
 
-    // 1. Optimistically update local React state immediately for instant UI response
-    setPhotos(prev => prev.map(p => {
-      if (targetIds.includes(p.photo.id)) {
-        return {
-          ...p,
-          userRating: {
-            ...p.userRating,
-            pick_status: pickStatus,
-            star_rating: starRating,
-            is_confirmed: true,
-            updated_at: Date.now(),
-          },
-        };
-      }
-      return p;
-    }));
+      // 1. Optimistically update local React state immediately for instant UI response
+      setPhotos(prev =>
+        prev.map(p => {
+          if (targetIds.includes(p.photo.id)) {
+            return {
+              ...p,
+              userRating: {
+                ...p.userRating,
+                pick_status: pickStatus,
+                star_rating: starRating,
+                is_confirmed: true,
+                updated_at: Date.now(),
+              },
+            };
+          }
+          return p;
+        })
+      );
 
-    // 2. Persist rating updates to backend DB if Tauri API is present
-    if (window.api) {
-      for (const id of targetIds) {
-        try {
-          const updated = await window.api.updateUserRating(id, pickStatus, starRating);
-          setPhotos(prev => prev.map(p => p.photo.id === id ? { ...p, userRating: updated } : p));
-        } catch (err) {
-          console.error('[App] Failed to update user rating in backend:', err);
+      // 2. Persist rating updates to backend DB if Tauri API is present
+      if (window.api) {
+        for (const id of targetIds) {
+          try {
+            const updated = await window.api.updateUserRating(id, pickStatus, starRating);
+            setPhotos(prev =>
+              prev.map(p => (p.photo.id === id ? { ...p, userRating: updated } : p))
+            );
+          } catch (err) {
+            console.error('[App] Failed to update user rating in backend:', err);
+          }
         }
       }
-    }
-  }, [selectedPhotoIds]);
+    },
+    [selectedPhotoIds]
+  );
+
+  // One-Action AI Suggestion Acceptance Engine (Supports single photo & multi-selection batch)
+  const handleAcceptAiSuggestion = useCallback(
+    async (photoId: string) => {
+      const targetIds =
+        selectedPhotoIds.has(photoId) && selectedPhotoIds.size > 1
+          ? Array.from(selectedPhotoIds)
+          : [photoId];
+
+      const updates: { photoId: string; pick: PickStatus; rating: number }[] = [];
+
+      // 1. Optimistic UI update
+      setPhotos(prev =>
+        prev.map(item => {
+          if (!targetIds.includes(item.photo.id)) return item;
+          const ai = item.aiPrediction;
+          if (!ai) return item;
+
+          const multiplier = getThresholdMultiplier(confidenceThreshold);
+          const meetsRatingConf =
+            (ai.rating_confidence ?? 0) >= multiplier * RATING_RANDOM_BASELINE;
+          const meetsPickConf = (ai.pick_confidence ?? 0) >= multiplier * PICK_RANDOM_BASELINE;
+          if (!meetsRatingConf || !meetsPickConf) return item;
+
+          const finalPick: PickStatus = ai.predicted_pick;
+          const finalRating = ai.predicted_rating;
+
+          updates.push({ photoId: item.photo.id, pick: finalPick, rating: finalRating });
+
+          return {
+            ...item,
+            userRating: {
+              ...item.userRating,
+              pick_status: finalPick,
+              star_rating: finalRating,
+              is_confirmed: true,
+              updated_at: Date.now(),
+            },
+          };
+        })
+      );
+
+      // 2. Persist updates to SQLite backend
+      if (window.api) {
+        for (const update of updates) {
+          try {
+            const updated = await window.api.updateUserRating(
+              update.photoId,
+              update.pick,
+              update.rating
+            );
+            setPhotos(prev =>
+              prev.map(p => (p.photo.id === update.photoId ? { ...p, userRating: updated } : p))
+            );
+          } catch (err) {
+            console.error('[App] Failed to update user rating on AI accept:', err);
+          }
+        }
+      }
+    },
+    [selectedPhotoIds, confidenceThreshold]
+  );
 
   // RawTherapee Exporter Handler
-  const handleExportRawTherapee = async (photoPath: string, rating: number, pickStatus: PickStatus) => {
+  const handleExportRawTherapee = async (
+    photoPath: string,
+    rating: number,
+    pickStatus: PickStatus
+  ) => {
     if (window.api) {
       await window.api.exportRawTherapee(photoPath, rating, pickStatus);
       alert(`Exported RawTherapee .pp3 sidecar for ${photoPath}`);
     } else {
-      alert(`[Browser Preview Mode] Generated RawTherapee .pp3 sidecar for ${photoPath}\nRating: ${rating} Stars | Pick: ${pickStatus.toUpperCase()}`);
+      alert(
+        `[Browser Preview Mode] Generated RawTherapee .pp3 sidecar for ${photoPath}\nRating: ${rating} Stars | Pick: ${pickStatus.toUpperCase()}`
+      );
     }
   };
 
@@ -471,18 +620,94 @@ export const App: React.FC = () => {
   // Global Ergonomic Keyboard Listener Engine
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore keybindings when typing inside input elements
+      // Ignore keybindings when typing inside input or editable elements
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) return;
 
       const key = e.key.toUpperCase();
+      const hasModifier = e.ctrlKey || e.metaKey;
 
-      // Sidebars Toggle Hotkeys
+      // Font Zoom Shortcuts (Ctrl/Cmd + +, Ctrl/Cmd + -, Ctrl/Cmd + 0)
+      if (hasModifier && (e.key === '=' || e.key === '+')) {
+        e.preventDefault();
+        setUiFontScale(prev => getNextFontScale(prev));
+        return;
+      }
+      if (hasModifier && (e.key === '-' || e.key === '_')) {
+        e.preventDefault();
+        setUiFontScale(prev => getPrevFontScale(prev));
+        return;
+      }
+      if (hasModifier && e.key === '0') {
+        e.preventDefault();
+        setUiFontScale('sm');
+        return;
+      }
+
+      // Sidebar Toggle Hotkeys ([ for Left, ] for Right, Ctrl+B for Left, Shift+Tab for Right)
+      if (e.key === '[') {
+        e.preventDefault();
+        setLeftSidebarCollapsed(prev => !prev);
+        return;
+      }
+      if (e.key === ']') {
+        e.preventDefault();
+        setRightSidebarCollapsed(prev => !prev);
+        return;
+      }
+      if (hasModifier && key === 'B') {
+        e.preventDefault();
+        setLeftSidebarCollapsed(prev => !prev);
+        return;
+      }
+
+      // Predictive Tab Acceptance & Focus Navigation
       if (e.key === 'Tab') {
         e.preventDefault();
         if (e.shiftKey) {
+          // Shift+Tab toggles Right Inspector Sidebar
           setRightSidebarCollapsed(prev => !prev);
+          return;
+        }
+
+        // Tab: Check if currently selected photo has valid unconfirmed AI suggestion
+        if (selectedPhotoId) {
+          const target = photos.find(p => p.photo.id === selectedPhotoId);
+          const hasEligibleSuggestion =
+            target &&
+            shouldShowAiSuggestion(target.userRating, target.aiPrediction, confidenceThreshold);
+
+          if (hasEligibleSuggestion) {
+            handleAcceptAiSuggestion(selectedPhotoId);
+            return;
+          }
+        }
+
+        // Otherwise cycle to next unrated photo
+        const currentIdx = filteredPhotos.findIndex(p => p.photo.id === selectedPhotoId);
+        let nextUnrated = filteredPhotos
+          .slice(currentIdx + 1)
+          .find(
+            p =>
+              !p.userRating.is_confirmed &&
+              p.userRating.star_rating === 0 &&
+              p.userRating.pick_status === 'unflagged'
+          );
+        if (!nextUnrated) {
+          nextUnrated = filteredPhotos
+            .slice(0, currentIdx)
+            .find(
+              p =>
+                !p.userRating.is_confirmed &&
+                p.userRating.star_rating === 0 &&
+                p.userRating.pick_status === 'unflagged'
+            );
+        }
+
+        if (nextUnrated) {
+          setSelectedPhotoId(nextUnrated.photo.id);
+          setSelectedPhotoIds(new Set([nextUnrated.photo.id]));
         } else {
-          setLeftSidebarCollapsed(prev => !prev);
+          handleNextPhoto();
         }
         return;
       }
@@ -494,7 +719,10 @@ export const App: React.FC = () => {
       if (key === 'S') handleViewModeChange('stats');
 
       // Compare View Elimination Hotkey (\ or Delete or Backspace)
-      if (viewMode === 'compare' && (e.key === '\\' || e.key === 'Delete' || e.key === 'Backspace')) {
+      if (
+        viewMode === 'compare' &&
+        (e.key === '\\' || e.key === 'Delete' || e.key === 'Backspace')
+      ) {
         e.preventDefault();
         if (selectedPhotoId) handleRemoveCandidate(selectedPhotoId);
       }
@@ -505,17 +733,25 @@ export const App: React.FC = () => {
 
       // Rating Keys (P, X, U, 0 to 5)
       if (selectedPhotoId) {
-        const currentPick = selectedPhoto?.userRating.pick_status || 'unflagged';
+        const currentPick = selectedPhoto?.userRating.pick_status || 'none';
         const currentStar = selectedPhoto?.userRating.star_rating || 0;
 
         if (key === 'P') {
-          handleUpdateRating(selectedPhotoId, currentPick === 'pick' ? 'unflagged' : 'pick', currentStar);
+          handleUpdateRating(
+            selectedPhotoId,
+            currentPick === 'pick' ? 'none' : 'pick',
+            currentStar
+          );
         }
         if (key === 'X') {
-          handleUpdateRating(selectedPhotoId, currentPick === 'reject' ? 'unflagged' : 'reject', currentStar);
+          handleUpdateRating(
+            selectedPhotoId,
+            currentPick === 'reject' ? 'none' : 'reject',
+            currentStar
+          );
         }
         if (key === 'U') {
-          handleUpdateRating(selectedPhotoId, 'unflagged', currentStar);
+          handleUpdateRating(selectedPhotoId, 'none', currentStar);
         }
 
         if (['0', '1', '2', '3', '4', '5'].includes(e.key)) {
@@ -527,11 +763,23 @@ export const App: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedPhotoId, selectedPhoto, viewMode, photos, selectedPhotoIds]);
+  }, [
+    selectedPhotoId,
+    selectedPhoto,
+    viewMode,
+    photos,
+    filteredPhotos,
+    selectedPhotoIds,
+    confidenceThreshold,
+    handleAcceptAiSuggestion,
+    handleUpdateRating,
+  ]);
 
   // Clear Database Handler
   const handleClearDatabase = async () => {
-    const confirmed = window.confirm('Are you sure you want to clear the local database and remove all cached thumbnails and ratings?');
+    const confirmed = window.confirm(
+      'Are you sure you want to clear the local database and remove all cached thumbnails and ratings?'
+    );
     if (!confirmed) return;
 
     if (window.api) {
@@ -562,6 +810,12 @@ export const App: React.FC = () => {
         onChangeFilters={setFilters}
         gridSize={gridSize}
         onChangeGridSize={setGridSize}
+        uiFontScale={uiFontScale}
+        onChangeFontScale={setUiFontScale}
+        confidenceThreshold={confidenceThreshold}
+        onChangeConfidenceThreshold={setConfidenceThreshold}
+        colorblindMode={colorblindMode}
+        onToggleColorblindMode={() => setColorblindMode(prev => !prev)}
         activeFolderName={activeFolder?.name}
         totalPhotosCount={photos.length}
         filteredPhotosCount={filteredPhotos.length}
@@ -590,6 +844,8 @@ export const App: React.FC = () => {
               selectedPhotoIds={selectedPhotoIds}
               onSelectPhoto={handleSelectPhoto}
               onUpdateRating={handleUpdateRating}
+              onAcceptAiSuggestion={handleAcceptAiSuggestion}
+              confidenceThreshold={confidenceThreshold}
               gridSize={gridSize}
             />
           )}
@@ -598,6 +854,8 @@ export const App: React.FC = () => {
             <LoupeView
               selectedPhoto={selectedPhoto}
               onUpdateRating={handleUpdateRating}
+              onAcceptAiSuggestion={handleAcceptAiSuggestion}
+              confidenceThreshold={confidenceThreshold}
               onNextPhoto={handleNextPhoto}
               onPrevPhoto={handlePrevPhoto}
             />
@@ -608,6 +866,8 @@ export const App: React.FC = () => {
               candidates={compareQueue}
               onRemoveCandidate={handleRemoveCandidate}
               onUpdateRating={handleUpdateRating}
+              onAcceptAiSuggestion={handleAcceptAiSuggestion}
+              confidenceThreshold={confidenceThreshold}
               onSelectWinner={photoData => {
                 setSelectedPhotoId(photoData.photo.id);
                 setViewMode('loupe');
@@ -618,7 +878,26 @@ export const App: React.FC = () => {
           {viewMode === 'stats' && (
             <StatsDashboard
               onRetrainAI={async () => {
-                if (window.api) await window.api.retrainAI();
+                if (window.api) {
+                  await window.api.retrainAI();
+                  // Re-fetch updated predictions for current folder
+                  if (activeFolderId) {
+                    const refreshed = await window.api.getPhotosInFolder(activeFolderId);
+                    setPhotos(prev =>
+                      refreshed.map(r => {
+                        const existing = prev.find(p => p.photo.id === r.photo.id);
+                        if (existing && existing.userRating.is_confirmed) {
+                          // Confirmed photos keep user ratings intact while updating underlying prediction
+                          return {
+                            ...r,
+                            userRating: existing.userRating,
+                          };
+                        }
+                        return r;
+                      })
+                    );
+                  }
+                }
               }}
               onAuditDisagreements={() => {
                 setFilters({ ...filters, showDisagreementsOnly: true });
@@ -644,6 +923,7 @@ export const App: React.FC = () => {
           selectedPhoto={selectedPhoto}
           onUpdateRating={handleUpdateRating}
           onExportRawTherapee={handleExportRawTherapee}
+          confidenceThreshold={confidenceThreshold}
         />
       </div>
     </div>

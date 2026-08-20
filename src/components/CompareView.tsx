@@ -1,13 +1,16 @@
 import React, { useState } from 'react';
 import { CombinedPhotoData, PickStatus } from '../types';
-import { X, ZoomIn, ZoomOut, CheckCircle2, XCircle, Sparkles, Trophy, Trash2 } from 'lucide-react';
+import { X, ZoomIn, ZoomOut, CheckCircle2, XCircle, Trophy, Trash2 } from 'lucide-react';
 import { getPhotoSrc } from '../utils/image';
 import { StarRating } from './StarRating';
+import { shouldShowGhostedStar, shouldShowGhostedPick } from '../utils/ratingUtils';
 
 interface CompareViewProps {
   candidates: CombinedPhotoData[];
   onRemoveCandidate: (photoId: string) => void;
   onUpdateRating: (photoId: string, pickStatus: PickStatus, starRating: number) => void;
+  onAcceptAiSuggestion?: (photoId: string) => void;
+  confidenceThreshold?: number;
   onSelectWinner: (photo: CombinedPhotoData) => void;
 }
 
@@ -15,15 +18,20 @@ export const CompareView: React.FC<CompareViewProps> = ({
   candidates,
   onRemoveCandidate,
   onUpdateRating,
+  onAcceptAiSuggestion,
+  confidenceThreshold = 0.25,
   onSelectWinner,
 }) => {
   const [zoomLevel, setZoomLevel] = useState<number>(1);
-  const [focusedPhotoId, setFocusedPhotoId] = useState<string | null>(candidates[0]?.photo.id || null);
+  const [focusedPhotoId, setFocusedPhotoId] = useState<string | null>(
+    candidates[0]?.photo.id || null
+  );
 
   if (candidates.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center text-xs text-gray-500 bg-[#0d0e11]">
-        Select 2 or more photos in Grid View and press Compare (C) to launch Elimination Compare Mode.
+        Select 2 or more photos in Grid View and press Compare (C) to launch Elimination Compare
+        Mode.
       </div>
     );
   }
@@ -44,7 +52,7 @@ export const CompareView: React.FC<CompareViewProps> = ({
   };
 
   return (
-    <div className="flex-1 flex flex-col bg-[#0d0e11] overflow-hidden relative">
+    <div className="flex-1 flex flex-col bg-[#0d0e11] overflow-hidden relative select-none">
       {/* Top Banner Control Bar */}
       <div className="h-12 bg-[#141519] border-b border-[#2a2d3a] px-4 flex items-center justify-between z-20 flex-shrink-0">
         <div className="flex items-center gap-2">
@@ -56,14 +64,21 @@ export const CompareView: React.FC<CompareViewProps> = ({
 
         <div className="flex items-center gap-3 text-xs">
           <span className="text-gray-400 hidden sm:inline">
-            Press <kbd className="bg-[#262933] px-1.5 py-0.5 rounded text-purple-300 font-mono">\</kbd> or <kbd className="bg-[#262933] px-1.5 py-0.5 rounded text-purple-300 font-mono">Del</kbd> to eliminate focused image
+            Press{' '}
+            <kbd className="bg-[#262933] px-1.5 py-0.5 rounded text-amber-300 font-mono">\</kbd> or{' '}
+            <kbd className="bg-[#262933] px-1.5 py-0.5 rounded text-amber-300 font-mono">Del</kbd>{' '}
+            to eliminate focused image
           </span>
 
           <button
             onClick={toggleZoom}
-            className="flex items-center gap-1.5 bg-[#262933] hover:bg-purple-900/40 text-gray-200 px-3 py-1 rounded-md transition border border-gray-700/50"
+            className="flex items-center gap-1.5 bg-[#262933] hover:bg-amber-950/40 text-gray-200 px-3 py-1 rounded-md transition border border-gray-700/50"
           >
-            {zoomLevel === 1 ? <ZoomIn className="w-3.5 h-3.5" /> : <ZoomOut className="w-3.5 h-3.5" />}
+            {zoomLevel === 1 ? (
+              <ZoomIn className="w-3.5 h-3.5" />
+            ) : (
+              <ZoomOut className="w-3.5 h-3.5" />
+            )}
             <span>{zoomLevel === 1 ? 'Sync Zoom 100% (Z)' : 'Reset Zoom'}</span>
           </button>
         </div>
@@ -89,7 +104,9 @@ export const CompareView: React.FC<CompareViewProps> = ({
 
             <div className="text-center space-y-3 mt-4">
               <h3 className="text-sm font-semibold text-white">{winner.photo.file_name}</h3>
-              <p className="text-xs text-gray-400">All other comparison candidates have been eliminated.</p>
+              <p className="text-xs text-gray-400">
+                All other comparison candidates have been eliminated.
+              </p>
 
               <div className="flex items-center justify-center gap-3 pt-2">
                 <button
@@ -97,7 +114,7 @@ export const CompareView: React.FC<CompareViewProps> = ({
                     onUpdateRating(winner.photo.id, 'pick', winner.userRating.star_rating || 4);
                     onSelectWinner(winner);
                   }}
-                  className="px-5 py-2.5 bg-green-600 hover:bg-green-500 text-white font-medium text-xs rounded-xl shadow-lg flex items-center gap-2 transition"
+                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 ring-1 ring-emerald-400 text-white font-medium text-xs rounded-xl shadow-lg flex items-center gap-2 transition"
                 >
                   <CheckCircle2 className="w-4 h-4" />
                   <span>Flag as Pick (P) & Confirm Winner</span>
@@ -114,13 +131,16 @@ export const CompareView: React.FC<CompareViewProps> = ({
               const ai = item.aiPrediction;
               const isFocused = photo.id === focusedPhotoId;
 
+              const showGhostStar = shouldShowGhostedStar(rating, ai, confidenceThreshold);
+              const ghostPick = shouldShowGhostedPick(rating, ai, confidenceThreshold);
+
               return (
                 <div
                   key={photo.id}
                   onClick={() => setFocusedPhotoId(photo.id)}
                   className={`group relative bg-[#141519] rounded-xl overflow-hidden border flex flex-col transition duration-150 ${
                     isFocused
-                      ? 'border-purple-500 ring-2 ring-purple-500/50 shadow-2xl'
+                      ? 'border-amber-400 ring-2 ring-amber-400/50 shadow-2xl'
                       : 'border-[#2a2d3a] hover:border-gray-600'
                   }`}
                 >
@@ -146,13 +166,14 @@ export const CompareView: React.FC<CompareViewProps> = ({
                   {/* Synchronized Zoom Image Area */}
                   <div className="flex-1 relative overflow-hidden flex items-center justify-center p-2 bg-black/40">
                     <img
-                      src={getPhotoSrc(photo.file_path || photo.thumbnail_path)}
+                      src={getPhotoSrc(photo.thumbnail_path || photo.file_path)}
                       alt={photo.file_name}
                       className="w-full h-full object-contain transition-transform duration-200"
                       onError={e => {
                         const target = e.currentTarget;
-                        if (photo.thumbnail_path && target.src !== getPhotoSrc(photo.thumbnail_path)) {
-                          target.src = getPhotoSrc(photo.thumbnail_path);
+                        const altSrc = getPhotoSrc(photo.file_path);
+                        if (altSrc && target.src !== altSrc) {
+                          target.src = altSrc;
                         }
                       }}
                       style={{
@@ -160,52 +181,91 @@ export const CompareView: React.FC<CompareViewProps> = ({
                         transformOrigin: 'center center',
                       }}
                     />
-
-                    {/* AI Preference Badge */}
-                    {ai && (
-                      <div className="absolute top-2 left-2 bg-purple-950/80 backdrop-blur-md px-2 py-0.5 rounded-full border border-purple-500/40 text-[10px] text-purple-200 font-medium flex items-center gap-1">
-                        <Sparkles className="w-3 h-3 text-purple-300" />
-                        <span>AI Suggests: {ai.predicted_rating} ★</span>
-                      </div>
-                    )}
                   </div>
 
                   {/* Card Bottom Quick Actions */}
                   <div className="h-10 bg-[#1a1c23] px-3 flex items-center justify-between border-t border-[#2a2d3a]">
                     <div className="flex items-center gap-1.5">
+                      {/* Pick button: Bright green when confirmed, Bluish for AI suggestion (No pulse) */}
                       <button
                         onClick={e => {
                           e.stopPropagation();
-                          onUpdateRating(photo.id, rating.pick_status === 'pick' ? 'unflagged' : 'pick', rating.star_rating);
+                          if (
+                            ghostPick === 'pick' &&
+                            (rating.pick_status === 'unflagged' || rating.pick_status === 'none') &&
+                            onAcceptAiSuggestion
+                          ) {
+                            onAcceptAiSuggestion(photo.id);
+                          } else {
+                            onUpdateRating(
+                              photo.id,
+                              rating.pick_status === 'pick' ? 'none' : 'pick',
+                              rating.star_rating
+                            );
+                          }
                         }}
                         className={`p-1.5 rounded transition ${
                           rating.pick_status === 'pick'
-                            ? 'bg-green-600 text-white'
-                            : 'bg-[#262933] text-gray-400 hover:text-green-400'
+                            ? 'bg-emerald-600 text-white ring-1 ring-emerald-400 font-bold'
+                            : ghostPick === 'pick'
+                              ? 'border-2 border-dashed border-sky-400 text-sky-300 bg-sky-950/60'
+                              : 'bg-[#262933] text-gray-400 hover:text-emerald-400'
                         }`}
-                        title="Pick Candidate (P)"
+                        title={
+                          rating.pick_status === 'pick'
+                            ? 'Pick Confirmed (P)'
+                            : ghostPick === 'pick'
+                              ? 'AI Suggestion: Pick (Click or Press Tab to Accept)'
+                              : 'Pick Candidate (P)'
+                        }
                       >
                         <CheckCircle2 className="w-3.5 h-3.5" />
                       </button>
 
+                      {/* Reject button: Bright red when confirmed (No pulse) */}
                       <button
                         onClick={e => {
                           e.stopPropagation();
-                          onUpdateRating(photo.id, rating.pick_status === 'reject' ? 'unflagged' : 'reject', rating.star_rating);
+                          if (
+                            ghostPick === 'reject' &&
+                            (rating.pick_status === 'unflagged' || rating.pick_status === 'none') &&
+                            onAcceptAiSuggestion
+                          ) {
+                            onAcceptAiSuggestion(photo.id);
+                          } else {
+                            onUpdateRating(
+                              photo.id,
+                              rating.pick_status === 'reject' ? 'none' : 'reject',
+                              rating.star_rating
+                            );
+                          }
                         }}
                         className={`p-1.5 rounded transition ${
                           rating.pick_status === 'reject'
-                            ? 'bg-red-600 text-white'
-                            : 'bg-[#262933] text-gray-400 hover:text-red-400'
+                            ? 'bg-rose-600 text-white ring-1 ring-rose-400 font-bold'
+                            : ghostPick === 'reject'
+                              ? 'border-2 border-dashed border-rose-400/80 text-rose-300 bg-rose-950/60'
+                              : 'bg-[#262933] text-gray-400 hover:text-rose-400'
                         }`}
-                        title="Reject Candidate (X)"
+                        title={
+                          rating.pick_status === 'reject'
+                            ? 'Reject Confirmed (X)'
+                            : ghostPick === 'reject'
+                              ? 'AI Suggestion: Reject (Click or Press Tab to Accept)'
+                              : 'Reject Candidate (X)'
+                        }
                       >
                         <XCircle className="w-3.5 h-3.5" />
                       </button>
 
                       <StarRating
                         rating={rating.star_rating}
-                        onRate={newRating => onUpdateRating(photo.id, rating.pick_status, newRating)}
+                        suggestedRating={ai?.predicted_rating}
+                        showSuggestion={showGhostStar}
+                        onRate={newRating =>
+                          onUpdateRating(photo.id, rating.pick_status, newRating)
+                        }
+                        onAcceptSuggestion={() => onAcceptAiSuggestion?.(photo.id)}
                         size="sm"
                       />
                     </div>

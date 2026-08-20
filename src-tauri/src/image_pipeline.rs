@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::BufReader;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use exif::{In, Tag, Value};
@@ -35,7 +35,7 @@ impl ImagePipeline {
         &self.cache_dir
     }
 
-    /// Scans a folder for image files using parallel iterator (rayon)
+    /// Scans a folder for image and raw files using parallel iterator (rayon)
     pub fn scan_folder(&self, folder_path: &str) -> Vec<PathBuf> {
         let path = Path::new(folder_path);
         if !path.is_dir() {
@@ -58,7 +58,7 @@ impl ImagePipeline {
                     let ext_lower = ext.to_lowercase();
                     matches!(
                         ext_lower.as_str(),
-                        "jpg" | "jpeg" | "png" | "webp" | "tiff" | "tif" | "cr2" | "nef" | "arw" | "dng"
+                        "jpg" | "jpeg" | "png" | "webp" | "tiff" | "tif"
                     )
                 } else {
                     false
@@ -67,70 +67,39 @@ impl ImagePipeline {
             .collect()
     }
 
-    /// Single-Pass Photo Processing:
-    /// Fast thumbnail generation (utilizing embedded EXIF thumbnail when available),
-    /// EXIF extraction, Quality Metrics, and Histogram in a single pass.
-    pub fn process_photo_single_pass(&self, image_path: &str, photo_id: &str) -> ProcessedPhotoResult {
-        let file_size = fs::metadata(image_path).map(|m| m.len() as i64).unwrap_or(0);
-        let thumb_filename = format!("{}_thumb.webp", photo_id);
-        let thumb_path = self.cache_dir.join(&thumb_filename);
-        let thumb_path_str = thumb_path.to_string_lossy().to_string();
-
-        let exif = self.extract_exif(image_path, photo_id);
-
-        let img_option = if thumb_path.exists() {
-            image::open(&thumb_path).ok()
-        } else {
-            // Try loading image from full file path
-            image::open(image_path).ok()
-        };
-
-        let (thumb_w, thumb_h, img_for_metrics) = match img_option {
-            Some(ref img) => {
-                let (_orig_w, _orig_h) = img.dimensions();
-                let resized = img.thumbnail(400, 400);
-                let (w, h) = resized.dimensions();
-                if !thumb_path.exists() {
-                    let _ = resized.save_with_format(&thumb_path, ImageFormat::WebP);
-                }
-                (w as i32, h as i32, resized)
-            }
-            None => (0, 0, image::DynamicImage::new_rgb8(1, 1)),
-        };
-
-        let quality = self.calculate_quality_metrics_from_image(&img_for_metrics, photo_id);
-        let histogram = self.calculate_histogram_from_image(&img_for_metrics);
-
-        ProcessedPhotoResult {
-            thumb_path: if thumb_w > 0 { thumb_path_str } else { String::new() },
-            width: thumb_w,
-            height: thumb_h,
-            file_size,
-            exif,
-            quality,
-            histogram,
-        }
-    }
-
-    /// Attempts fast extraction of embedded EXIF JPEG thumbnail (<2ms)
+    /// Fast path: Attempts extraction of embedded EXIF thumbnail (<1ms, negligible RAM)
     pub fn try_extract_embedded_thumbnail(&self, image_path: &str) -> Option<image::DynamicImage> {
         let file = File::open(image_path).ok()?;
         let mut buf_reader = BufReader::new(file);
         let exif_reader = exif::Reader::new();
         let exif = exif_reader.read_from_container(&mut buf_reader).ok()?;
 
-        if let Some(field) = exif.get_field(Tag::JPEGInterchangeFormat, In::PRIMARY) {
-            if let Value::Long(ref offsets) = field.value {
-                if let Some(&offset) = offsets.first() {
-                    if let Some(len_field) = exif.get_field(Tag::JPEGInterchangeFormatLength, In::PRIMARY) {
-                        if let Value::Long(ref lengths) = len_field.value {
-                            if let Some(&length) = lengths.first() {
-                                use std::io::{Read, Seek, SeekFrom};
-                                let mut f = File::open(image_path).ok()?;
-                                if f.seek(SeekFrom::Start(offset as u64)).is_ok() {
-                                    let mut buffer = vec![0u8; length as usize];
-                                    if f.read_exact(&mut buffer).is_ok() {
-                                        return image::load_from_memory(&buffer).ok();
+        for field in exif.fields() {
+            if field.tag == Tag::JPEGInterchangeFormat {
+                let offset_opt = match field.value {
+                    Value::Long(ref v) => v.first().copied(),
+                    Value::Short(ref v) => v.first().map(|&x| x as u32),
+                    _ => None,
+                };
+                if let Some(offset) = offset_opt {
+                    let mut length_opt = None;
+                    for lf in exif.fields() {
+                        if lf.tag == Tag::JPEGInterchangeFormatLength {
+                            length_opt = match lf.value {
+                                Value::Long(ref v) => v.first().copied(),
+                                Value::Short(ref v) => v.first().map(|&x| x as u32),
+                                _ => None,
+                            };
+                            break;
+                        }
+                    }
+                    if let Some(length) = length_opt {
+                        if let Ok(mut f) = File::open(image_path) {
+                            if f.seek(SeekFrom::Start(offset as u64)).is_ok() {
+                                let mut buffer = vec![0u8; length as usize];
+                                if f.read_exact(&mut buffer).is_ok() {
+                                    if let Ok(img) = image::load_from_memory(&buffer) {
+                                        return Some(img);
                                     }
                                 }
                             }
@@ -142,8 +111,7 @@ impl ImagePipeline {
         None
     }
 
-    /// Fast Path Phase 1: Generates 400px WebP thumbnail ONLY if cached or embedded EXIF thumbnail exists (<2ms).
-    /// NEVER decodes full resolution images (`image::open`) during Phase 1.
+    /// Fast Path Stage 1: Generates 400px WebP thumbnail from embedded EXIF or direct decode.
     pub fn generate_thumbnail_fast_exif_only(&self, image_path: &str, photo_id: &str) -> (String, i32, i32, i64) {
         let thumb_filename = format!("{}_thumb.webp", photo_id);
         let thumb_path = self.cache_dir.join(&thumb_filename);
@@ -151,58 +119,69 @@ impl ImagePipeline {
         let file_size = fs::metadata(image_path).map(|m| m.len() as i64).unwrap_or(0);
 
         if thumb_path.exists() {
-            if let Ok(img) = image::open(&thumb_path) {
-                let (w, h) = img.dimensions();
-                return (thumb_path_str, w as i32, h as i32, file_size);
-            }
+            return (thumb_path_str, 400, 400, file_size);
         }
 
+        // 1. Instant path: Embedded EXIF thumbnail (< 1ms, < 100KB RAM)
         if let Some(img) = self.try_extract_embedded_thumbnail(image_path) {
-            let (orig_w, orig_h) = img.dimensions();
             let resized = img.thumbnail(400, 400);
             let (thumb_w, thumb_h) = resized.dimensions();
+            let _ = resized.save_with_format(&thumb_path, ImageFormat::WebP);
+            return (thumb_path_str, thumb_w as i32, thumb_h as i32, file_size);
+        }
 
-            if let Ok(_) = resized.save_with_format(&thumb_path, ImageFormat::WebP) {
-                return (thumb_path_str, thumb_w as i32, thumb_h as i32, file_size);
-            } else {
-                return (thumb_path_str, orig_w as i32, orig_h as i32, file_size);
-            }
+        // 2. Direct decode only when no embedded thumbnail is available
+        if let Ok(img) = image::open(image_path) {
+            let resized = img.thumbnail(400, 400);
+            let (thumb_w, thumb_h) = resized.dimensions();
+            let _ = resized.save_with_format(&thumb_path, ImageFormat::WebP);
+            return (thumb_path_str, thumb_w as i32, thumb_h as i32, file_size);
         }
 
         (String::new(), 0, 0, file_size)
     }
 
-    /// Generates a 400px WebP thumbnail cached on disk (Fast Path)
+    /// Generates a 400px WebP thumbnail cached on disk
     pub fn generate_thumbnail(&self, image_path: &str, photo_id: &str) -> (String, i32, i32, i64) {
+        self.generate_thumbnail_fast_exif_only(image_path, photo_id)
+    }
+
+    /// Deep Path Stage 2: EXIF extraction, Quality Metrics, and Histogram using cached 400px thumbnail.
+    pub fn process_photo_single_pass(&self, image_path: &str, photo_id: &str) -> ProcessedPhotoResult {
+        let file_size = fs::metadata(image_path).map(|m| m.len() as i64).unwrap_or(0);
         let thumb_filename = format!("{}_thumb.webp", photo_id);
         let thumb_path = self.cache_dir.join(&thumb_filename);
         let thumb_path_str = thumb_path.to_string_lossy().to_string();
-        let file_size = fs::metadata(image_path).map(|m| m.len() as i64).unwrap_or(0);
 
-        if thumb_path.exists() {
-            if let Ok(img) = image::open(&thumb_path) {
-                let (w, h) = img.dimensions();
-                return (thumb_path_str, w as i32, h as i32, file_size);
-            }
-        }
+        let exif = self.extract_exif(image_path, photo_id);
 
-        let loaded_img = self
-            .try_extract_embedded_thumbnail(image_path)
-            .or_else(|| image::open(image_path).ok());
-
-        if let Some(img) = loaded_img {
-            let (orig_w, orig_h) = img.dimensions();
-            let resized = img.thumbnail(400, 400);
-            let (thumb_w, thumb_h) = resized.dimensions();
-
-            if let Ok(_) = resized.save_with_format(&thumb_path, ImageFormat::WebP) {
-                return (thumb_path_str, thumb_w as i32, thumb_h as i32, file_size);
+        // Compute metrics from the lightweight 400px thumbnail (< 500KB RAM) rather than raw 45MP files
+        let img = if thumb_path.exists() {
+            image::open(&thumb_path).unwrap_or_else(|_| image::DynamicImage::new_rgb8(1, 1))
+        } else {
+            let (t_path, _, _, _) = self.generate_thumbnail_fast_exif_only(image_path, photo_id);
+            if !t_path.is_empty() && Path::new(&t_path).exists() {
+                image::open(&t_path).unwrap_or_else(|_| image::DynamicImage::new_rgb8(1, 1))
             } else {
-                return (thumb_path_str, orig_w as i32, orig_h as i32, file_size);
+                image::DynamicImage::new_rgb8(1, 1)
             }
-        }
+        };
 
-        (String::new(), 0, 0, file_size)
+        let (thumb_w, thumb_h) = img.dimensions();
+        let quality = self.calculate_quality_metrics_from_image(&img, photo_id);
+        let histogram = self.calculate_histogram_from_image(&img);
+
+        let has_valid_thumb = thumb_path.exists() || thumb_w > 1;
+
+        ProcessedPhotoResult {
+            thumb_path: if has_valid_thumb { thumb_path_str } else { String::new() },
+            width: if thumb_w > 1 { thumb_w as i32 } else { 400 },
+            height: if thumb_h > 1 { thumb_h as i32 } else { 400 },
+            file_size,
+            exif,
+            quality,
+            histogram,
+        }
     }
 
     /// Extracts EXIF metadata using the `exif` crate
@@ -275,7 +254,7 @@ impl ImagePipeline {
             if let Value::SRational(ref v) = field.value {
                 if let Some(rat) = v.first() {
                     let eb = rat.num as f64 / rat.denom as f64;
-                    exif_data.exposure_bias = Some((eb * 100.0).round() / 100.0);
+                    exif_data.exposure_bias = Some((eb * 10.0).round() / 10.0);
                 }
             }
         }
@@ -350,28 +329,6 @@ impl ImagePipeline {
         }
     }
 
-    pub fn calculate_quality_metrics(&self, image_path: &str, photo_id: &str) -> QualityMetrics {
-        let thumb_filename = format!("{}_thumb.webp", photo_id);
-        let thumb_path = self.cache_dir.join(&thumb_filename);
-
-        let img_result = if thumb_path.exists() {
-            image::open(&thumb_path)
-        } else {
-            image::open(image_path)
-        };
-
-        match img_result {
-            Ok(i) => self.calculate_quality_metrics_from_image(&i, photo_id),
-            Err(_) => QualityMetrics {
-                photo_id: photo_id.to_string(),
-                blur_score: 100.0,
-                is_black_frame: false,
-                is_overexposed: false,
-                mean_luminance: 128.0,
-            },
-        }
-    }
-
     pub fn calculate_histogram_from_image(&self, img: &image::DynamicImage) -> HistogramData {
         let rgb_img = img.resize(300, 300, image::imageops::FilterType::Triangle).to_rgb8();
 
@@ -410,25 +367,25 @@ impl ImagePipeline {
     }
 
     pub fn calculate_histogram(&self, image_path: &str, photo_id: Option<&str>) -> HistogramData {
-        let mut input_path = PathBuf::from(image_path);
         if let Some(pid) = photo_id {
             let thumb_path = self.cache_dir.join(format!("{}_thumb.webp", pid));
             if thumb_path.exists() {
-                input_path = thumb_path;
+                if let Ok(img) = image::open(&thumb_path) {
+                    return self.calculate_histogram_from_image(&img);
+                }
             }
         }
 
-        match image::open(&input_path) {
-            Ok(i) => self.calculate_histogram_from_image(&i),
-            Err(_) => {
-                let zeros = vec![0; 256];
-                HistogramData {
-                    red: zeros.clone(),
-                    green: zeros.clone(),
-                    blue: zeros.clone(),
-                    luma: zeros,
-                }
-            }
+        if let Some(img) = self.extract_image_or_preview(image_path) {
+            return self.calculate_histogram_from_image(&img);
+        }
+
+        let zeros = vec![0; 256];
+        HistogramData {
+            red: zeros.clone(),
+            green: zeros.clone(),
+            blue: zeros.clone(),
+            luma: zeros,
         }
     }
 }
