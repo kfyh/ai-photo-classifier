@@ -168,7 +168,7 @@ impl MLEngine {
 
     pub fn retrain(&mut self, db: &AppDatabase) -> Result<(AccuracyLog, String), String> {
         let confirmed_data = db
-            .get_confirmed_training_data()
+            .get_confirmed_training_data(&self.active_model.provider_type, &self.active_model.id)
             .map_err(|e| e.to_string())?;
 
         println!(
@@ -176,16 +176,12 @@ impl MLEngine {
             confirmed_data.len()
         );
 
-        let mut samples = Vec::new();
-        for (photo_id, pick_status, star_rating) in confirmed_data {
-            if let Ok(Some(emb)) = db.get_embedding(
-                &photo_id,
-                &self.active_model.provider_type,
-                &self.active_model.id,
-            ) {
-                samples.push((photo_id, pick_status, star_rating, emb));
-            }
-        }
+        let samples: Vec<(String, String, i32, Vec<f32>)> = confirmed_data
+            .into_iter()
+            .map(|(embedding, _quality, rating)| {
+                (rating.photo_id, rating.pick_status, rating.star_rating, embedding)
+            })
+            .collect();
 
         let (log, snapshot_id) = self.classifier.train(&samples);
         db.save_accuracy_log(&log).map_err(|e| e.to_string())?;

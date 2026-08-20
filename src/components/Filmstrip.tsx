@@ -1,6 +1,6 @@
 import React from 'react';
 import { CombinedPhotoData } from '../types';
-import { Star, CheckCircle2, XCircle } from 'lucide-react';
+import { CheckCircle2, XCircle } from 'lucide-react';
 import { getPhotoSrc } from '../utils/image';
 
 interface FilmstripProps {
@@ -9,11 +9,7 @@ interface FilmstripProps {
   onSelectPhoto: (photo: CombinedPhotoData) => void;
 }
 
-export const Filmstrip: React.FC<FilmstripProps> = ({
-  photos,
-  selectedPhotoId,
-  onSelectPhoto,
-}) => {
+export const Filmstrip: React.FC<FilmstripProps> = ({ photos, selectedPhotoId, onSelectPhoto }) => {
   if (photos.length === 0) return null;
 
   return (
@@ -29,7 +25,7 @@ export const Filmstrip: React.FC<FilmstripProps> = ({
             onClick={() => onSelectPhoto(item)}
             className={`relative h-14 w-14 rounded-lg overflow-hidden flex-shrink-0 border transition ${
               isSelected
-                ? 'border-purple-500 ring-2 ring-purple-500/50 scale-105'
+                ? 'border-amber-400 ring-2 ring-amber-400/50 scale-105'
                 : 'border-[#2a2d3a] hover:border-gray-500 opacity-70 hover:opacity-100'
             }`}
           >
@@ -38,17 +34,30 @@ export const Filmstrip: React.FC<FilmstripProps> = ({
               alt={photo.file_name}
               className="w-full h-full object-cover"
               loading="lazy"
+              onError={e => {
+                const target = e.currentTarget;
+                const altSrc = getPhotoSrc(photo.file_path);
+                if (altSrc && target.src !== altSrc) {
+                  target.src = altSrc;
+                }
+              }}
             />
 
             {/* Badges */}
             <div className="absolute bottom-0.5 right-0.5 flex gap-0.5">
               {rating.pick_status === 'pick' && (
-                <span className="bg-green-600 text-white p-0.5 rounded-full">
+                <span
+                  className="bg-emerald-600 text-white ring-1 ring-emerald-400 p-0.5 rounded-full"
+                  title="Pick"
+                >
                   <CheckCircle2 className="w-2.5 h-2.5" />
                 </span>
               )}
               {rating.pick_status === 'reject' && (
-                <span className="bg-red-600 text-white p-0.5 rounded-full">
+                <span
+                  className="bg-rose-600 text-white ring-1 ring-rose-400 p-0.5 rounded-full"
+                  title="Reject"
+                >
                   <XCircle className="w-2.5 h-2.5" />
                 </span>
               )}

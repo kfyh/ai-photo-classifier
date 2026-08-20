@@ -3,8 +3,8 @@ use rand::Rng;
 
 pub struct LogisticRegressionHead {
     dim: usize,
-    pick_weights: Vec<f32>,
-    rating_weights: Vec<Vec<f32>>, // 6 classes x dim
+    pick_weights: Vec<Vec<f32>>, // 3 classes (0: none, 1: pick, 2: reject) x dim
+    rating_weights: Vec<Vec<f32>>, // 6 classes (0..5 stars) x dim
     is_trained: bool,
 }
 
@@ -13,7 +13,12 @@ impl LogisticRegressionHead {
         let dim = embedding_dim + 3; // +3 for quality metrics
         let mut rng = rand::thread_rng();
 
-        let pick_weights: Vec<f32> = (0..dim).map(|_| (rng.gen::<f32>() - 0.5) * 0.1).collect();
+        // 3 classes for Pick head: 0 = none, 1 = pick, 2 = reject
+        let pick_weights: Vec<Vec<f32>> = (0..3)
+            .map(|_| (0..dim).map(|_| (rng.gen::<f32>() - 0.5) * 0.1).collect())
+            .collect();
+
+        // 6 classes for Rating head: 0..5 stars
         let rating_weights: Vec<Vec<f32>> = (0..6)
             .map(|_| (0..dim).map(|_| (rng.gen::<f32>() - 0.5) * 0.1).collect())
             .collect();
@@ -50,14 +55,43 @@ impl LogisticRegressionHead {
     ) -> AIPrediction {
         let z = Self::build_augmented_vector(embedding, quality);
 
-        // 1. Pick/Reject Sigmoid Classifier
-        let mut pick_dot = 0.0f32;
-        for i in 0..z.len() {
-            pick_dot += self.pick_weights[i] * z[i];
+        // 1. Pick/Reject/None 3-Class Softmax Classifier (0: none, 1: pick, 2: reject)
+        let mut pick_scores = [0.0f32; 3];
+        let mut max_pick_score = f32::NEG_INFINITY;
+        for c in 0..3 {
+            let mut dot = 0.0f32;
+            for i in 0..z.len() {
+                dot += self.pick_weights[c][i] * z[i];
+            }
+            pick_scores[c] = dot;
+            if dot > max_pick_score {
+                max_pick_score = dot;
+            }
         }
-        let pick_prob = 1.0f32 / (1.0f32 + (-pick_dot).exp());
-        let predicted_pick = if pick_prob >= 0.5 { "pick" } else { "reject" };
-        let pick_conf = if pick_prob >= 0.5 { pick_prob } else { 1.0 - pick_prob };
+
+        let mut exp_pick_sum = 0.0f32;
+        let mut exp_pick_scores = [0.0f32; 3];
+        for c in 0..3 {
+            exp_pick_scores[c] = (pick_scores[c] - max_pick_score).exp();
+            exp_pick_sum += exp_pick_scores[c];
+        }
+
+        let mut max_pick_prob = 0.0f32;
+        let mut best_pick_class = 0;
+        for c in 0..3 {
+            let prob = exp_pick_scores[c] / exp_pick_sum;
+            if prob > max_pick_prob {
+                max_pick_prob = prob;
+                best_pick_class = c;
+            }
+        }
+
+        let predicted_pick = match best_pick_class {
+            1 => "pick",
+            2 => "reject",
+            _ => "none",
+        };
+        let pick_conf = max_pick_prob;
 
         // 2. Ordinal Star Rating Softmax Predictor (0 to 5)
         let mut rating_scores = [0.0f32; 6];
@@ -121,22 +155,44 @@ impl LogisticRegressionHead {
             for (_id, pick_status, star_rating, embedding) in samples {
                 let z = Self::build_augmented_vector(embedding, None);
 
-                // --- Retrain Pick Head ---
-                if pick_status != "unflagged" {
-                    let target = if pick_status == "pick" { 1.0f32 } else { 0.0f32 };
+                // --- Retrain Pick Head (Valid targets: pick = 1, reject = 2, none/unflagged = 0) ---
+                let target_pick = match pick_status.as_str() {
+                    "pick" => 1usize,
+                    "reject" => 2usize,
+                    _ => 0usize, // "none" or "unflagged"
+                };
+
+                let mut pick_scores = [0.0f32; 3];
+                let mut max_pick_score = f32::NEG_INFINITY;
+                for c in 0..3 {
                     let mut dot = 0.0f32;
                     for i in 0..z.len() {
-                        dot += self.pick_weights[i] * z[i];
+                        dot += self.pick_weights[c][i] * z[i];
                     }
-                    let prob = 1.0f32 / (1.0f32 + (-dot).exp());
-                    let err = prob - target;
-
-                    for i in 0..z.len() {
-                        self.pick_weights[i] -= lr * (err * z[i] + lambda * self.pick_weights[i]);
+                    pick_scores[c] = dot;
+                    if dot > max_pick_score {
+                        max_pick_score = dot;
                     }
                 }
 
-                // --- Retrain Rating Head ---
+                let mut exp_pick_sum = 0.0f32;
+                let mut exp_pick_scores = [0.0f32; 3];
+                for c in 0..3 {
+                    exp_pick_scores[c] = (pick_scores[c] - max_pick_score).exp();
+                    exp_pick_sum += exp_pick_scores[c];
+                }
+
+                for c in 0..3 {
+                    let prob = exp_pick_scores[c] / exp_pick_sum;
+                    let target_prob = if c == target_pick { 1.0f32 } else { 0.0f32 };
+                    let err = prob - target_prob;
+
+                    for i in 0..z.len() {
+                        self.pick_weights[c][i] -= lr * (err * z[i] + lambda * self.pick_weights[c][i]);
+                    }
+                }
+
+                // --- Retrain Rating Head (0..5 stars) ---
                 let target_rating = *star_rating as usize;
                 let mut rating_scores = [0.0f32; 6];
                 let mut max_score = f32::NEG_INFINITY;
@@ -178,7 +234,7 @@ impl LogisticRegressionHead {
             .unwrap_or(0);
         let snapshot_id = format!("snap_{}", now);
 
-        // --- Evaluate Accuracy & Build Confusion Matrix ---
+        // --- Evaluate Accuracy & Build Confusion Matrix across pick/reject/none ---
         let mut pick_correct = 0;
         let mut total_picks_eval = 0;
         let mut rating_correct = 0;
@@ -188,16 +244,51 @@ impl LogisticRegressionHead {
         for (_id, pick_status, star_rating, embedding) in samples {
             let z = Self::build_augmented_vector(embedding, None);
 
-            let mut pick_dot = 0.0f32;
-            for i in 0..z.len() {
-                pick_dot += self.pick_weights[i] * z[i];
-            }
-            let pred_pick = if (1.0f32 / (1.0f32 + (-pick_dot).exp())) >= 0.5 { "pick" } else { "reject" };
-            if pick_status != "unflagged" {
-                total_picks_eval += 1;
-                if pred_pick == pick_status {
-                    pick_correct += 1;
+            let mut pick_scores = [0.0f32; 3];
+            let mut max_pick_score = f32::NEG_INFINITY;
+            for c in 0..3 {
+                let mut dot = 0.0f32;
+                for i in 0..z.len() {
+                    dot += self.pick_weights[c][i] * z[i];
                 }
+                pick_scores[c] = dot;
+                if dot > max_pick_score {
+                    max_pick_score = dot;
+                }
+            }
+
+            let mut exp_pick_sum = 0.0f32;
+            let mut exp_pick_scores = [0.0f32; 3];
+            for c in 0..3 {
+                exp_pick_scores[c] = (pick_scores[c] - max_pick_score).exp();
+                exp_pick_sum += exp_pick_scores[c];
+            }
+
+            let mut best_pick_class = 0;
+            let mut max_pick_prob = 0.0f32;
+            for c in 0..3 {
+                let prob = exp_pick_scores[c] / exp_pick_sum;
+                if prob > max_pick_prob {
+                    max_pick_prob = prob;
+                    best_pick_class = c;
+                }
+            }
+
+            let pred_pick = match best_pick_class {
+                1 => "pick",
+                2 => "reject",
+                _ => "none",
+            };
+
+            let target_pick = match pick_status.as_str() {
+                "pick" => "pick",
+                "reject" => "reject",
+                _ => "none",
+            };
+
+            total_picks_eval += 1;
+            if pred_pick == target_pick {
+                pick_correct += 1;
             }
 
             let mut best_class = 0;

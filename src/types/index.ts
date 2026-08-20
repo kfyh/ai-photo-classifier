@@ -1,4 +1,5 @@
-export type PickStatus = 'pick' | 'reject' | 'unflagged';
+export type PickStatus = 'pick' | 'reject' | 'none' | 'unflagged';
+export type ProcessingStatus = 'pending' | 'processing' | 'completed' | 'error';
 
 export interface FolderRecord {
   id: string;
@@ -19,6 +20,8 @@ export interface PhotoRecord {
   date_taken: number | null;
   created_at: number;
   thumbnail_path: string | null;
+  processing_status?: ProcessingStatus;
+  histogram_json?: string | null;
 }
 
 export interface PhotoExif {
@@ -52,7 +55,7 @@ export interface QualityMetrics {
 export interface PhotoEmbedding {
   photo_id: string;
   provider_type: string; // 'local_onnx', 'cloud_openai', etc.
-  model_name: string;    // 'mobilenet_v3', 'clip_vit_b32', etc.
+  model_name: string; // 'mobilenet_v3', 'clip_vit_b32', etc.
   model_version: string;
   embedding: Float32Array;
   created_at: number;
@@ -64,7 +67,7 @@ export interface AIPrediction {
   model_name: string;
   predicted_pick: PickStatus;
   predicted_rating: number; // 0 to 5
-  pick_confidence: number;   // [0.0, 1.0]
+  pick_confidence: number; // [0.0, 1.0]
   rating_confidence: number; // [0.0, 1.0]
   model_snapshot_id: string | null;
   updated_at: number;
@@ -83,6 +86,7 @@ export interface ImportProgressData {
   current: number;
   total: number;
   photo?: CombinedPhotoData;
+  photos?: CombinedPhotoData[];
 }
 
 export interface ModelSnapshot {
@@ -121,8 +125,25 @@ export interface MLModelOption {
 
 export type ViewMode = 'grid' | 'loupe' | 'compare' | 'stats';
 
+export type FontSizeScale = 'sm' | 'md' | 'lg' | 'xl';
+
+export const FONT_SCALES: Record<FontSizeScale, { label: string; scale: number; basePx: number }> =
+  {
+    sm: { label: 'Standard (100%)', scale: 1.0, basePx: 13 },
+    md: { label: 'Medium (115%)', scale: 1.15, basePx: 15 },
+    lg: { label: 'Large (130%)', scale: 1.3, basePx: 17 },
+    xl: { label: 'Extra Large (145%)', scale: 1.45, basePx: 19 },
+  };
+
+export interface AppSettings {
+  aiConfidenceThreshold: number; // Default: 0.25 (25%)
+  uiFontScale: FontSizeScale; // 'sm' | 'md' | 'lg' | 'xl'
+  colorblindMode: boolean; // Default: true
+  autoAdvanceOnRate: boolean; // Auto-select next photo upon rating/accepting
+}
+
 export interface FilterSettings {
-  pickFilter: 'all' | 'pick' | 'reject' | 'unflagged';
+  pickFilter: 'all' | 'pick' | 'reject' | 'none' | 'unflagged';
   minRating: number;
   maxRating: number;
   showDisagreementsOnly: boolean;

@@ -2,6 +2,42 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  /* UI Scaling factor */
+  --ui-scale: 1;
+  --font-base: calc(14px * var(--ui-scale));
+
+  /* Colorblind-Safe Semantic Tokens */
+  /* Pick / Positive / Keeper: High-luminance Bright Green (not blue) */
+  --color-pick-bg: #16a34a;
+  --color-pick-border: #4ade80;
+  --color-pick-fg: #f0fdf4;
+  --color-pick-ghost: rgba(74, 222, 128, 0.35);
+
+  /* Reject / Negative / Discard: High-luminance Bright Red */
+  --color-reject-bg: #dc2626;
+  --color-reject-border: #f87171;
+  --color-reject-fg: #fef2f2;
+  --color-reject-ghost: rgba(248, 113, 113, 0.35);
+
+  /* User Selection: High-contrast Warm Yellow / Amber */
+  --color-selection-border: #fbbf24;
+  --color-selection-glow: rgba(251, 191, 36, 0.45);
+
+  /* AI Accent & Badges: High-contrast Bluish Color (Sky / Cerulean) */
+  --color-ai-suggestion: #38bdf8;
+  --color-ai-badge-bg: #0c2340;
+  --color-ai-badge-border: #38bdf8;
+  --color-ai-badge-text: #e0f2fe;
+  --color-ai-conf-high: #34d399; /* High confidence (>= 80%) */
+  --color-ai-conf-med: #fbbf24; /* Medium confidence (50-79%) */
+  --color-ai-conf-low: #f87171; /* Low confidence (< 50%) */
+}
+
+html {
+  font-size: calc(14px * var(--ui-scale));
+}
+
 @layer base {
   body {
     @apply bg-[#121316] text-gray-200 font-sans antialiased select-none;
@@ -38,4 +74,13 @@
   background: rgba(26, 28, 35, 0.85);
   backdrop-filter: blur(12px);
   border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* AI Accept Inline Pill Button (Bluish theme) */
+.ai-accept-pill {
+  @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold tracking-wide bg-[#0c2340]/90 text-sky-200 border border-sky-400/60 shadow-lg backdrop-blur-md hover:bg-[#0369a1] hover:text-white hover:border-sky-300 transition-all duration-150 cursor-pointer;
+}
+
+.kbd-badge {
+  @apply inline-block px-1.5 py-0.5 text-[9px] font-mono font-bold bg-black/70 text-sky-300 rounded border border-sky-500/40 shadow-inner leading-none;
 }
