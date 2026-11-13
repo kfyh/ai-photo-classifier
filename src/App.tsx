@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo, useCallback } from 'react';
+import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import {
   CombinedPhotoData,
   FilterSettings,
@@ -16,6 +16,7 @@ import { LoupeView } from './components/LoupeView';
 import { CompareView } from './components/CompareView';
 import { StatsDashboard } from './components/StatsDashboard';
 import { Filmstrip } from './components/Filmstrip';
+import { BottomRibbon } from './components/BottomRibbon';
 import {
   applyUiScale,
   getNextFontScale,
@@ -47,6 +48,10 @@ export const App: React.FC = () => {
   // Data States
   const [folders, setFolders] = useState<(FolderRecord & { photoCount?: number })[]>([]);
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
+  const activeFolderIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeFolderIdRef.current = activeFolderId;
+  }, [activeFolderId]);
   const [photos, setPhotos] = useState<CombinedPhotoData[]>([]);
 
   // Selection Queue States
@@ -75,20 +80,29 @@ export const App: React.FC = () => {
     total: number;
   } | null>(null);
 
-  // Listen to background progress streams from Electron Main process
+  // Listen to background progress streams from Tauri backend
   useEffect(() => {
     if (!window.api) return;
 
     const unbindProgress = window.api.onImportProgress(data => {
-      setImportProgress({ folderId: data.folderId, current: data.current, total: data.total });
+      if (data.total > 0) {
+        setImportProgress({ folderId: data.folderId, current: data.current, total: data.total });
 
-      // Update folder list photo counts live in UI
-      setFolders(prev =>
-        prev.map(f => (f.id === data.folderId ? { ...f, photoCount: data.total } : f))
-      );
+        // Update folder list photo counts live in UI without shrinking existing total count
+        setFolders(prev =>
+          prev.map(f =>
+            f.id === data.folderId
+              ? { ...f, photoCount: Math.max(f.photoCount || 0, data.total) }
+              : f
+          )
+        );
+      }
 
       // Append or update photos in current view if active folder matches
       if (data.photo || data.photos) {
+        if (activeFolderIdRef.current && data.folderId && data.folderId !== activeFolderIdRef.current) {
+          return;
+        }
         const incoming: CombinedPhotoData[] = data.photos || (data.photo ? [data.photo] : []);
         if (incoming.length > 0) {
           setPhotos(prev => {
@@ -100,7 +114,17 @@ export const App: React.FC = () => {
             for (const item of incoming) {
               const idx = idMap.get(item.photo.id);
               if (idx !== undefined) {
-                next[idx] = item;
+                next[idx] = {
+                  ...next[idx],
+                  ...item,
+                  photo: {
+                    ...next[idx].photo,
+                    ...item.photo,
+                    thumbnail_path: item.photo.thumbnail_path || next[idx].photo.thumbnail_path,
+                  },
+                  exif: item.exif || next[idx].exif,
+                  aiPrediction: item.aiPrediction || next[idx].aiPrediction,
+                };
               } else {
                 idMap.set(item.photo.id, next.length);
                 next.push(item);
@@ -113,7 +137,9 @@ export const App: React.FC = () => {
     });
 
     const unbindComplete = window.api.onImportComplete(data => {
-      setImportProgress({ folderId: data.folderId, current: data.total, total: data.total });
+      if (data.total > 0) {
+        setImportProgress({ folderId: data.folderId, current: data.total, total: data.total });
+      }
       setTimeout(() => {
         setImportProgress(null);
       }, 2000);
@@ -231,13 +257,6 @@ export const App: React.FC = () => {
             is_confirmed: true,
             updated_at: Date.now(),
           },
-          quality: {
-            photo_id: photoId,
-            blur_score: 92 - i * 3,
-            is_black_frame: false,
-            is_overexposed: false,
-            mean_luminance: 120 + i * 5,
-          },
           aiPrediction: {
             photo_id: photoId,
             provider_type: 'local_onnx',
@@ -260,9 +279,12 @@ export const App: React.FC = () => {
     }
   }, []);
 
+  const importingFolderIdRef = useRef<string | null>(null);
+
   // Fetch Photos when active folder changes
   useEffect(() => {
     if (!activeFolderId) return;
+    if (importingFolderIdRef.current === activeFolderId) return;
 
     if (window.api) {
       window.api
@@ -281,15 +303,41 @@ export const App: React.FC = () => {
     }
   }, [activeFolderId]);
 
-  // Open Folder Dialog Handler (Supports both Electron Native Dialog and Web Browser Directory Picker)
+  // Open Folder Dialog Handler (Supports both Tauri Native Dialog and Web Browser Directory Picker)
   const handleOpenFolderDialog = async () => {
     if (window.api) {
       const res = await window.api.selectFolder();
       if (res) {
-        const importedFolder = await window.api.importFolder(res.path);
-        const updatedFolders = await window.api.getFolders();
-        setFolders(updatedFolders);
-        setActiveFolderId(importedFolder.id);
+        importingFolderIdRef.current = res.id;
+        // Show the newly selected folder in the left sidebar immediately
+        setFolders(prev => {
+          const exists = prev.some(f => f.id === res.id);
+          return exists ? prev : [res, ...prev];
+        });
+        setActiveFolderId(res.id);
+        setPhotos([]);
+
+        // Yield to let the browser paint the new folder in the sidebar immediately before scanning
+        await new Promise<void>(resolve =>
+          requestAnimationFrame(() => setTimeout(resolve, 0))
+        );
+
+        try {
+          const importedFolder = await window.api.importFolder(res.path);
+          const updatedFolders = await window.api.getFolders();
+          setFolders(updatedFolders);
+          setActiveFolderId(importedFolder.id);
+
+          // Immediately load the registered photo catalog for this folder
+          const folderPhotos = await window.api.getPhotosInFolder(importedFolder.id);
+          setPhotos(folderPhotos);
+          if (folderPhotos.length > 0) {
+            setSelectedPhotoId(folderPhotos[0].photo.id);
+            setSelectedPhotoIds(new Set([folderPhotos[0].photo.id]));
+          }
+        } finally {
+          importingFolderIdRef.current = null;
+        }
       }
     } else {
       // Web browser directory selector fallback
@@ -374,13 +422,6 @@ export const App: React.FC = () => {
               star_rating: 0,
               is_confirmed: false,
               updated_at: Date.now(),
-            },
-            quality: {
-              photo_id: photoId,
-              blur_score: 85,
-              is_black_frame: false,
-              is_overexposed: false,
-              mean_luminance: 130,
             },
             aiPrediction: {
               photo_id: photoId,
@@ -570,19 +611,30 @@ export const App: React.FC = () => {
   };
 
   // Select Photo Handler
-  const handleSelectPhoto = (photoData: CombinedPhotoData, isMultiSelect: boolean = false) => {
-    const id = photoData.photo.id;
-    setSelectedPhotoId(id);
+  const handleSelectPhoto = useCallback(
+    (photoData: CombinedPhotoData, isMultiSelect: boolean = false) => {
+      if (
+        document.activeElement instanceof HTMLElement &&
+        ['SELECT', 'BUTTON', 'INPUT'].includes(document.activeElement.tagName)
+      ) {
+        document.activeElement.blur();
+      }
+      const id = photoData.photo.id;
+      setSelectedPhotoId(id);
 
-    if (isMultiSelect) {
-      const next = new Set(selectedPhotoIds);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      setSelectedPhotoIds(next);
-    } else {
-      setSelectedPhotoIds(new Set([id]));
-    }
-  };
+      if (isMultiSelect) {
+        setSelectedPhotoIds(prev => {
+          const next = new Set(prev);
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+          return next;
+        });
+      } else {
+        setSelectedPhotoIds(new Set([id]));
+      }
+    },
+    []
+  );
 
   // Navigate Prev / Next Photo
   const handlePrevPhoto = () => {
@@ -604,13 +656,20 @@ export const App: React.FC = () => {
   };
 
   // Mode Switcher Helper (Entering Compare Mode Populates Elimination Queue)
-  const handleViewModeChange = (mode: ViewMode) => {
-    if (mode === 'compare') {
-      const queue = photos.filter(p => selectedPhotoIds.has(p.photo.id));
-      setCompareQueue(queue.length >= 2 ? queue : photos.slice(0, 4));
-    }
-    setViewMode(mode);
-  };
+  const handleViewModeChange = useCallback(
+    (mode: ViewMode) => {
+      if (mode === 'compare') {
+        const queue = photos.filter(p => selectedPhotoIds.has(p.photo.id));
+        setCompareQueue(queue.length >= 2 ? queue : filteredPhotos.slice(0, 4));
+      } else if (mode === 'loupe' && !selectedPhotoId && filteredPhotos.length > 0) {
+        const firstId = filteredPhotos[0].photo.id;
+        setSelectedPhotoId(firstId);
+        setSelectedPhotoIds(new Set([firstId]));
+      }
+      setViewMode(mode);
+    },
+    [photos, filteredPhotos, selectedPhotoId, selectedPhotoIds]
+  );
 
   // Elimination Compare Handler: Remove Candidate
   const handleRemoveCandidate = (photoId: string) => {
@@ -619,12 +678,25 @@ export const App: React.FC = () => {
 
   // Global Ergonomic Keyboard Listener Engine
   useEffect(() => {
+    const isTextInputFocused = (target: EventTarget | null): boolean => {
+      const el = target as HTMLElement | null;
+      if (!el) return false;
+      if (el.isContentEditable) return true;
+      if (el.tagName === 'TEXTAREA') return true;
+      if (el.tagName === 'INPUT') {
+        const type = (el as HTMLInputElement).type?.toLowerCase() || 'text';
+        return !['range', 'checkbox', 'radio', 'button', 'submit', 'reset'].includes(type);
+      }
+      return false;
+    };
+
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore keybindings when typing inside input or editable elements
-      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) return;
+      // Ignore keybindings only when typing inside text input or editable elements
+      if (isTextInputFocused(e.target)) return;
 
       const key = e.key.toUpperCase();
       const hasModifier = e.ctrlKey || e.metaKey;
+      const isSelectTarget = (e.target as HTMLElement | null)?.tagName === 'SELECT';
 
       // Font Zoom Shortcuts (Ctrl/Cmd + +, Ctrl/Cmd + -, Ctrl/Cmd + 0)
       if (hasModifier && (e.key === '=' || e.key === '+')) {
@@ -657,6 +729,11 @@ export const App: React.FC = () => {
       if (hasModifier && key === 'B') {
         e.preventDefault();
         setLeftSidebarCollapsed(prev => !prev);
+        return;
+      }
+
+      // Allow native select navigation with arrows/Enter when a <select> is actively open/focused
+      if (isSelectTarget && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Enter')) {
         return;
       }
 
@@ -712,11 +789,29 @@ export const App: React.FC = () => {
         return;
       }
 
-      // View Switching Hotkeys
-      if (key === 'G') handleViewModeChange('grid');
-      if (key === 'E' || e.key === 'Enter') handleViewModeChange('loupe');
-      if (key === 'C') handleViewModeChange('compare');
-      if (key === 'S') handleViewModeChange('stats');
+      // View Switching Hotkeys (unmodified keys only so Ctrl+C / Ctrl+S etc. are preserved)
+      if (!hasModifier && !e.altKey) {
+        if (key === 'G') {
+          e.preventDefault();
+          handleViewModeChange('grid');
+          return;
+        }
+        if (key === 'E' || e.key === 'Enter') {
+          e.preventDefault();
+          handleViewModeChange('loupe');
+          return;
+        }
+        if (key === 'C') {
+          e.preventDefault();
+          handleViewModeChange('compare');
+          return;
+        }
+        if (key === 'S') {
+          e.preventDefault();
+          handleViewModeChange('stats');
+          return;
+        }
+      }
 
       // Compare View Elimination Hotkey (\ or Delete or Backspace)
       if (
@@ -728,11 +823,21 @@ export const App: React.FC = () => {
       }
 
       // Navigation Keys
-      if (e.key === 'ArrowLeft') handlePrevPhoto();
-      if (e.key === 'ArrowRight') handleNextPhoto();
+      if (!hasModifier && !e.altKey) {
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          handlePrevPhoto();
+          return;
+        }
+        if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          handleNextPhoto();
+          return;
+        }
+      }
 
       // Rating Keys (P, X, U, 0 to 5)
-      if (selectedPhotoId) {
+      if (selectedPhotoId && !hasModifier && !e.altKey) {
         const currentPick = selectedPhoto?.userRating.pick_status || 'none';
         const currentStar = selectedPhoto?.userRating.star_rating || 0;
 
@@ -773,6 +878,7 @@ export const App: React.FC = () => {
     confidenceThreshold,
     handleAcceptAiSuggestion,
     handleUpdateRating,
+    handleViewModeChange,
   ]);
 
   // Clear Database Handler
@@ -823,7 +929,7 @@ export const App: React.FC = () => {
       />
 
       {/* Main 3-Column Layout */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 min-h-0 flex overflow-hidden">
         {/* Collapsible Left Folder Sidebar */}
         <LeftSidebar
           isCollapsed={leftSidebarCollapsed}
@@ -926,6 +1032,16 @@ export const App: React.FC = () => {
           confidenceThreshold={confidenceThreshold}
         />
       </div>
+
+      {/* Bottom View Switcher Ribbon */}
+      <BottomRibbon
+        viewMode={viewMode}
+        onChangeViewMode={handleViewModeChange}
+        selectedPhotoName={selectedPhoto?.photo.file_name}
+        selectedCount={selectedPhotoIds.size}
+        filteredPhotosCount={filteredPhotos.length}
+        totalPhotosCount={photos.length}
+      />
     </div>
   );
 };

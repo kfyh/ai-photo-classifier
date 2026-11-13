@@ -148,7 +148,10 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           <span className="text-gray-400 hidden lg:inline">ML Model:</span>
           <select
             value={activeModel?.id || ''}
-            onChange={e => onChangeModel(e.target.value)}
+            onChange={e => {
+              onChangeModel(e.target.value);
+              e.currentTarget.blur();
+            }}
             className="bg-transparent text-white font-medium focus:outline-none cursor-pointer pr-2"
           >
             {availableModels.map(model => (
@@ -170,7 +173,10 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           </span>
           <select
             value={confidenceThreshold}
-            onChange={e => onChangeConfidenceThreshold(Number(e.target.value))}
+            onChange={e => {
+              onChangeConfidenceThreshold(Number(e.target.value));
+              e.currentTarget.blur();
+            }}
             className="bg-transparent text-sky-300 font-mono font-medium focus:outline-none cursor-pointer"
             title="Threshold Multiplier: requires both rating and pick certainty to be at least N× above uniform random chance"
           >
@@ -206,7 +212,10 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           <Type className="w-3.5 h-3.5 text-gray-400" />
           <select
             value={uiFontScale}
-            onChange={e => onChangeFontScale(e.target.value as FontSizeScale)}
+            onChange={e => {
+              onChangeFontScale(e.target.value as FontSizeScale);
+              e.currentTarget.blur();
+            }}
             className="bg-transparent text-gray-300 text-xs focus:outline-none cursor-pointer"
             title="UI Font Zoom Level (Ctrl + / Ctrl -)"
           >
@@ -253,12 +262,13 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
         {/* Pick Status Filter (Green Pick / Red Reject) */}
         <select
           value={filters.pickFilter}
-          onChange={e =>
+          onChange={e => {
             onChangeFilters({
               ...filters,
               pickFilter: e.target.value as 'all' | 'pick' | 'reject' | 'unflagged',
-            })
-          }
+            });
+            e.currentTarget.blur();
+          }}
           className="bg-[#141519] text-gray-300 text-xs px-2.5 py-1.5 rounded-lg border border-[#2a2d3a] focus:outline-none cursor-pointer"
         >
           <option value="all">All Flags</option>
@@ -278,6 +288,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
               step="20"
               value={gridSize}
               onChange={e => onChangeGridSize(Number(e.target.value))}
+              onMouseUp={e => e.currentTarget.blur()}
               className="w-20 accent-amber-500 cursor-pointer"
               title="Adjust Thumbnail Size"
             />

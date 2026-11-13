@@ -1,8 +1,19 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { CombinedPhotoData, PickStatus } from '../types';
-import { X, ZoomIn, ZoomOut, CheckCircle2, XCircle, Trophy, Trash2 } from 'lucide-react';
-import { getPhotoSrc } from '../utils/image';
+import {
+  X,
+  ZoomIn,
+  ZoomOut,
+  CheckCircle2,
+  XCircle,
+  Trophy,
+  Trash2,
+  SunMedium,
+  Loader2,
+} from 'lucide-react';
+import { getPhotoSrc, useResolvedThumbnails } from '../utils/image';
 import { StarRating } from './StarRating';
+import { BlinkiesOverlay } from './BlinkiesOverlay';
 import { shouldShowGhostedStar, shouldShowGhostedPick } from '../utils/ratingUtils';
 
 interface CompareViewProps {
@@ -14,6 +25,68 @@ interface CompareViewProps {
   onSelectWinner: (photo: CombinedPhotoData) => void;
 }
 
+interface CompareImageWithBlinkiesProps {
+  src: string;
+  fallbackSrc: string;
+  alt: string;
+  photoId: string;
+  zoomLevel: number;
+  showBlinkies: boolean;
+  className?: string;
+}
+
+const CompareImageWithBlinkies: React.FC<CompareImageWithBlinkiesProps> = ({
+  src,
+  fallbackSrc,
+  alt,
+  photoId,
+  zoomLevel,
+  showBlinkies,
+  className = '',
+}) => {
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [activeSrc, setActiveSrc] = useState(src || fallbackSrc);
+
+  useEffect(() => {
+    setLoaded(false);
+    setActiveSrc(src || fallbackSrc);
+  }, [src, fallbackSrc]);
+
+  return (
+    <div className="relative w-full h-full flex items-center justify-center overflow-hidden">
+      {activeSrc ? (
+        <img
+          ref={imgRef}
+          src={activeSrc}
+          alt={alt}
+          onLoad={() => setLoaded(true)}
+          onError={() => {
+            if (fallbackSrc && activeSrc !== fallbackSrc) {
+              setActiveSrc(fallbackSrc);
+            }
+          }}
+          className={`w-full h-full object-contain transition-transform duration-200 ${className}`}
+          style={{
+            transform: `scale(${zoomLevel})`,
+            transformOrigin: 'center center',
+          }}
+        />
+      ) : (
+        <Loader2 className="w-6 h-6 text-gray-600 animate-spin" />
+      )}
+      <BlinkiesOverlay
+        enabled={showBlinkies}
+        imgElement={imgRef.current}
+        imageLoaded={loaded}
+        imageKey={`${photoId}:${activeSrc}`}
+        zoomLevel={zoomLevel}
+        className="absolute inset-0 w-full h-full object-contain transition-transform duration-200"
+      />
+    </div>
+  );
+};
+
 export const CompareView: React.FC<CompareViewProps> = ({
   candidates,
   onRemoveCandidate,
@@ -22,10 +95,33 @@ export const CompareView: React.FC<CompareViewProps> = ({
   confidenceThreshold = 0.25,
   onSelectWinner,
 }) => {
+  useResolvedThumbnails(candidates);
   const [zoomLevel, setZoomLevel] = useState<number>(1);
+  // Blinkies is strictly off by default and only user-toggled
+  const [showBlinkies, setShowBlinkies] = useState<boolean>(false);
   const [focusedPhotoId, setFocusedPhotoId] = useState<string | null>(
     candidates[0]?.photo.id || null
   );
+
+  // Compare View Keyboard Shortcuts: Z (Sync Zoom), B (Toggle Blinkies)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+      const key = e.key.toUpperCase();
+      if (key === 'Z') {
+        e.preventDefault();
+        setZoomLevel(prev => (prev === 1 ? 2.2 : 1));
+      } else if (key === 'B') {
+        e.preventDefault();
+        setShowBlinkies(prev => !prev);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   if (candidates.length === 0) {
     return (
@@ -71,6 +167,19 @@ export const CompareView: React.FC<CompareViewProps> = ({
           </span>
 
           <button
+            onClick={() => setShowBlinkies(prev => !prev)}
+            title="Toggle Highlight & Shadow Clipping Warning Overlay (B)"
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-md transition border ${
+              showBlinkies
+                ? 'bg-rose-950/60 text-rose-300 border-rose-500/60 font-semibold'
+                : 'bg-[#262933] hover:bg-gray-800 text-gray-200 border-gray-700/50'
+            }`}
+          >
+            <SunMedium className="w-3.5 h-3.5" />
+            <span>Blinkies (B)</span>
+          </button>
+
+          <button
             onClick={toggleZoom}
             className="flex items-center gap-1.5 bg-[#262933] hover:bg-amber-950/40 text-gray-200 px-3 py-1 rounded-md transition border border-gray-700/50"
           >
@@ -95,10 +204,14 @@ export const CompareView: React.FC<CompareViewProps> = ({
             </div>
 
             <div className="flex-1 w-full max-h-[70%] flex items-center justify-center p-4">
-              <img
-                src={getPhotoSrc(winner.photo.file_path)}
+              <CompareImageWithBlinkies
+                src={getPhotoSrc(winner.photo.thumbnail_path || winner.photo.file_path, winner.photo.id)}
+                fallbackSrc={getPhotoSrc(winner.photo.file_path, winner.photo.id)}
                 alt={winner.photo.file_name}
-                className="max-h-full object-contain rounded-lg shadow-2xl border border-white/10"
+                photoId={winner.photo.id}
+                zoomLevel={zoomLevel}
+                showBlinkies={showBlinkies}
+                className="rounded-lg shadow-2xl border border-white/10"
               />
             </div>
 
@@ -140,7 +253,7 @@ export const CompareView: React.FC<CompareViewProps> = ({
                   onClick={() => setFocusedPhotoId(photo.id)}
                   className={`group relative bg-[#141519] rounded-xl overflow-hidden border flex flex-col transition duration-150 ${
                     isFocused
-                      ? 'border-amber-400 ring-2 ring-amber-400/50 shadow-2xl'
+                      ? 'border-2 border-white ring-2 ring-white/80 shadow-2xl'
                       : 'border-[#2a2d3a] hover:border-gray-600'
                   }`}
                 >
@@ -163,23 +276,15 @@ export const CompareView: React.FC<CompareViewProps> = ({
                     </button>
                   </div>
 
-                  {/* Synchronized Zoom Image Area */}
+                  {/* Synchronized Zoom Image Area with Optional Blinkies Overlay */}
                   <div className="flex-1 relative overflow-hidden flex items-center justify-center p-2 bg-black/40">
-                    <img
-                      src={getPhotoSrc(photo.thumbnail_path || photo.file_path)}
+                    <CompareImageWithBlinkies
+                      src={getPhotoSrc(photo.thumbnail_path || photo.file_path, photo.id)}
+                      fallbackSrc={getPhotoSrc(photo.file_path, photo.id)}
                       alt={photo.file_name}
-                      className="w-full h-full object-contain transition-transform duration-200"
-                      onError={e => {
-                        const target = e.currentTarget;
-                        const altSrc = getPhotoSrc(photo.file_path);
-                        if (altSrc && target.src !== altSrc) {
-                          target.src = altSrc;
-                        }
-                      }}
-                      style={{
-                        transform: `scale(${zoomLevel})`,
-                        transformOrigin: 'center center',
-                      }}
+                      photoId={photo.id}
+                      zoomLevel={zoomLevel}
+                      showBlinkies={showBlinkies}
                     />
                   </div>
 

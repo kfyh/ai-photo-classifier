@@ -92,10 +92,18 @@ export function normalizeCombinedPhoto(item: BackendCombinedPhotoData): Combined
 }
 
 export interface TauriAPI {
-  selectFolder: () => Promise<{ path: string; name: string } | null>;
+  selectFolder: () => Promise<(FolderRecord & { photoCount?: number }) | null>;
   getFolders: () => Promise<(FolderRecord & { photoCount?: number })[]>;
-  importFolder: (folderPath: string) => Promise<FolderRecord>;
+  importFolder: (folderPath: string) => Promise<FolderRecord & { photoCount?: number }>;
   getPhotosInFolder: (folderId: string) => Promise<CombinedPhotoData[]>;
+  getThumbnailsBatch: (
+    items: { id: string; filePath: string }[]
+  ) => Promise<Record<string, string>>;
+  getSizedThumbnailsBatch: (
+    items: { id: string; filePath: string }[],
+    slotPx: number
+  ) => Promise<Record<string, string>>;
+  prioritizeThumbnails: (photoIds: string[]) => Promise<void>;
   updateUserRating: (
     photoId: string,
     pickStatus: PickStatus,
@@ -120,7 +128,11 @@ export const tauriApi: TauriAPI = {
     try {
       const res = await invoke<FolderRecord | null>('select_folder');
       if (!res) return null;
-      return { path: res.path, name: res.name };
+      return {
+        ...res,
+        photoCount:
+          res.photoCount ?? (res as FolderRecord & { photo_count?: number }).photo_count ?? 0,
+      };
     } catch (err) {
       console.error('[TauriAPI] selectFolder error:', err);
       return null;
@@ -141,7 +153,11 @@ export const tauriApi: TauriAPI = {
   },
 
   importFolder: async (folderPath: string) => {
-    return await invoke<FolderRecord>('import_folder', { folderPath });
+    const f = await invoke<FolderRecord>('import_folder', { folderPath });
+    return {
+      ...f,
+      photoCount: f.photoCount ?? (f as FolderRecord & { photo_count?: number }).photo_count ?? 0,
+    };
   },
 
   getPhotosInFolder: async (folderId: string) => {
@@ -151,6 +167,41 @@ export const tauriApi: TauriAPI = {
     } catch (err) {
       console.error('[TauriAPI] getPhotosInFolder error:', err);
       return [];
+    }
+  },
+
+  getThumbnailsBatch: async (items: { id: string; filePath: string }[]) => {
+    if (!items || items.length === 0) return {};
+    try {
+      return await invoke<Record<string, string>>('get_thumbnails_batch', { items });
+    } catch (err) {
+      console.warn('[TauriAPI] getThumbnailsBatch warning:', err);
+      return {};
+    }
+  },
+
+  getSizedThumbnailsBatch: async (
+    items: { id: string; filePath: string }[],
+    slotPx: number
+  ) => {
+    if (!items || items.length === 0) return {};
+    try {
+      return await invoke<Record<string, string>>('get_sized_thumbnails_batch', {
+        items,
+        slotPx,
+      });
+    } catch (err) {
+      console.warn('[TauriAPI] getSizedThumbnailsBatch warning:', err);
+      return {};
+    }
+  },
+
+  prioritizeThumbnails: async (photoIds: string[]) => {
+    if (!photoIds || photoIds.length === 0) return;
+    try {
+      await invoke('prioritize_thumbnails', { photoIds });
+    } catch (err) {
+      console.warn('[TauriAPI] prioritizeThumbnails warning:', err);
     }
   },
 

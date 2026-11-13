@@ -1,11 +1,13 @@
 use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::Read;
 
 use crate::ml::traits::{FeatureExtractorAdapter, ModelMetadata};
-use crate::models::QualityMetrics;
 
 pub struct CloudVisionAdapter {
     metadata: ModelMetadata,
     api_key: Option<String>,
+    #[allow(dead_code)]
     client: reqwest::Client,
 }
 
@@ -40,19 +42,28 @@ impl FeatureExtractorAdapter for CloudVisionAdapter {
         Ok(())
     }
 
-    fn extract_embedding(&self, image_path: &str, quality: Option<&QualityMetrics>) -> Result<Vec<f32>, String> {
-        // Fallback hash embedding if API key is not configured or in offline mode
+    fn extract_embedding(&self, image_path: &str) -> Result<Vec<f32>, String> {
         let dim = self.metadata.embedding_dim;
         let mut hasher = Sha256::new();
         hasher.update(format!("{}:{}", self.metadata.id, image_path).as_bytes());
+
+        if let Ok(mut file) = File::open(image_path) {
+            let mut sample_buf = [0u8; 4096];
+            if let Ok(n) = file.read(&mut sample_buf) {
+                if n > 0 {
+                    hasher.update(&sample_buf[..n]);
+                }
+            }
+        }
+
         let hash_result = hasher.finalize();
 
         let mut embedding = vec![0.0f32; dim];
         for i in 0..dim {
-            let byte_val = hash_result[i % hash_result.len()];
-            let norm_val = (byte_val as f32 / 255.0) * 2.0 - 1.0;
-            let blur_factor = quality.map(|q| q.blur_score as f32 / 500.0).unwrap_or(0.0);
-            embedding[i] = (norm_val + blur_factor).tanh();
+            let b0 = hash_result[i % hash_result.len()] as f32;
+            let b1 = hash_result[(i * 11 + 5) % hash_result.len()] as f32;
+            let norm_val = ((b0 * 0.65 + b1 * 0.35) / 255.0) * 2.0 - 1.0;
+            embedding[i] = norm_val.tanh();
         }
         Ok(embedding)
     }

@@ -9,10 +9,18 @@ import {
 } from './index';
 
 export interface TauriAPI {
-  selectFolder: () => Promise<{ path: string; name: string } | null>;
+  selectFolder: () => Promise<(FolderRecord & { photoCount?: number }) | null>;
   getFolders: () => Promise<(FolderRecord & { photoCount?: number })[]>;
-  importFolder: (folderPath: string) => Promise<FolderRecord>;
+  importFolder: (folderPath: string) => Promise<FolderRecord & { photoCount?: number }>;
   getPhotosInFolder: (folderId: string) => Promise<CombinedPhotoData[]>;
+  getThumbnailsBatch?: (
+    items: { id: string; filePath: string }[]
+  ) => Promise<Record<string, string>>;
+  getSizedThumbnailsBatch?: (
+    items: { id: string; filePath: string }[],
+    slotPx: number
+  ) => Promise<Record<string, string>>;
+  prioritizeThumbnails: (photoIds: string[]) => Promise<void>;
   updateUserRating: (
     photoId: string,
     pickStatus: PickStatus,

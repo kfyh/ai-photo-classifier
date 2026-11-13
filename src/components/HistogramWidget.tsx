@@ -2,9 +2,10 @@ import React, { useEffect, useState } from 'react';
 
 interface HistogramWidgetProps {
   imagePath: string | null;
+  photoId?: string;
 }
 
-export const HistogramWidget: React.FC<HistogramWidgetProps> = ({ imagePath }) => {
+export const HistogramWidget: React.FC<HistogramWidgetProps> = ({ imagePath, photoId }) => {
   const [data, setData] = useState<{
     red: number[];
     green: number[];
@@ -22,7 +23,7 @@ export const HistogramWidget: React.FC<HistogramWidgetProps> = ({ imagePath }) =
 
     if (window.api) {
       window.api
-        .getHistogram(imagePath)
+        .getHistogram(imagePath, photoId)
         .then(res => {
           if (isMounted) {
             setData(res);
@@ -69,7 +70,7 @@ export const HistogramWidget: React.FC<HistogramWidgetProps> = ({ imagePath }) =
     return () => {
       isMounted = false;
     };
-  }, [imagePath]);
+  }, [imagePath, photoId]);
 
   if (!imagePath) {
     return (
@@ -97,15 +98,7 @@ export const HistogramWidget: React.FC<HistogramWidgetProps> = ({ imagePath }) =
     });
 
     const pathD = `M 0,80 L ${points.join(' L ')} L 240,80 Z`;
-    return (
-      <path
-        d={pathD}
-        fill={fillColor}
-        stroke={strokeColor}
-        strokeWidth="1"
-        className="transition-all duration-300 opacity-60 mix-blend-screen"
-      />
-    );
+    return <path d={pathD} fill={fillColor} stroke={strokeColor} strokeWidth="1" opacity="0.7" />;
   };
 
   return (
@@ -132,7 +125,7 @@ export const HistogramWidget: React.FC<HistogramWidgetProps> = ({ imagePath }) =
       </div>
 
       <div className="relative h-20 w-full bg-[#0d0e11] rounded overflow-hidden border border-[#222530]">
-        <svg viewBox="0 0 240 80" className="w-full h-full preserve-3d">
+        <svg viewBox="0 0 240 80" className="w-full h-full">
           {/* Tonal Range Grid Lines */}
           <line x1="60" y1="0" x2="60" y2="80" stroke="#2a2d3a" strokeDasharray="2,2" />
           <line x1="120" y1="0" x2="120" y2="80" stroke="#2a2d3a" strokeDasharray="2,2" />

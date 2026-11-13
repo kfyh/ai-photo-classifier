@@ -11,7 +11,6 @@ use crate::models::{
 
 pub struct AppDatabase {
     conn: Arc<Mutex<Connection>>,
-    db_path: PathBuf,
 }
 
 impl AppDatabase {
@@ -35,7 +34,6 @@ impl AppDatabase {
 
         let db = AppDatabase {
             conn: Arc::new(Mutex::new(conn)),
-            db_path,
         };
 
         db.init_tables()?;
@@ -160,6 +158,8 @@ impl AppDatabase {
         // Safe migrations for existing databases
         let _ = conn.execute("ALTER TABLE photos ADD COLUMN processing_status TEXT NOT NULL DEFAULT 'completed'", []);
         let _ = conn.execute("ALTER TABLE photos ADD COLUMN histogram_json TEXT", []);
+        // Remove previously imported macOS AppleDouble / hidden dotfiles (e.g. ._DSCF5301.JPG)
+        let _ = conn.execute("DELETE FROM photos WHERE file_name LIKE '.%'", []);
 
         Ok(())
     }
@@ -280,7 +280,7 @@ impl AppDatabase {
             )?;
 
             for photo in photos {
-                stmt_photo.execute(params![
+                let inserted = stmt_photo.execute(params![
                     photo.id,
                     photo.folder_id,
                     photo.file_path,
@@ -294,7 +294,9 @@ impl AppDatabase {
                     photo.processing_status,
                     photo.histogram_json,
                 ])?;
-                stmt_rating.execute(params![photo.id, now])?;
+                if inserted > 0 {
+                    stmt_rating.execute(params![photo.id, now])?;
+                }
             }
         }
 
@@ -364,21 +366,139 @@ impl AppDatabase {
         }
     }
 
+    pub fn get_photos_by_ids(&self, photo_ids: &[String]) -> Result<Vec<PhotoRecord>> {
+        if photo_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, folder_id, file_path, file_name, file_size, width, height, date_taken, created_at, thumbnail_path, processing_status, histogram_json
+             FROM photos WHERE id = ?1",
+        )?;
+
+        let mut list = Vec::with_capacity(photo_ids.len());
+        for pid in photo_ids {
+            let mut iter = stmt.query_map(params![pid], |row| {
+                Ok(PhotoRecord {
+                    id: row.get(0)?,
+                    folder_id: row.get(1)?,
+                    file_path: row.get(2)?,
+                    file_name: row.get(3)?,
+                    file_size: row.get(4)?,
+                    width: row.get(5)?,
+                    height: row.get(6)?,
+                    date_taken: row.get(7)?,
+                    created_at: row.get(8)?,
+                    thumbnail_path: row.get(9)?,
+                    processing_status: row.get(10).unwrap_or_else(|_| "pending".to_string()),
+                    histogram_json: row.get(11).ok(),
+                })
+            })?;
+            if let Some(Ok(record)) = iter.next() {
+                list.push(record);
+            }
+        }
+        Ok(list)
+    }
+
+    pub fn get_photos_missing_thumbnails_in_folder(&self, folder_id: &str) -> Result<Vec<PhotoRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, folder_id, file_path, file_name, file_size, width, height, date_taken, created_at, thumbnail_path, processing_status, histogram_json
+             FROM photos
+             WHERE folder_id = ?1 AND (thumbnail_path IS NULL OR length(thumbnail_path) = 0)
+             ORDER BY date_taken DESC, file_name ASC",
+        )?;
+
+        let iter = stmt.query_map(params![folder_id], |row| {
+            Ok(PhotoRecord {
+                id: row.get(0)?,
+                folder_id: row.get(1)?,
+                file_path: row.get(2)?,
+                file_name: row.get(3)?,
+                file_size: row.get(4)?,
+                width: row.get(5)?,
+                height: row.get(6)?,
+                date_taken: row.get(7)?,
+                created_at: row.get(8)?,
+                thumbnail_path: row.get(9)?,
+                processing_status: row.get(10).unwrap_or_else(|_| "pending".to_string()),
+                histogram_json: row.get(11).ok(),
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for item in iter {
+            list.push(item?);
+        }
+        Ok(list)
+    }
+
+    /// Atomic batch update of generated thumbnail paths, dimensions, and file sizes
+    pub fn update_photos_thumbnails_batch(&self, photos: &[PhotoRecord]) -> Result<()> {
+        if photos.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE photos SET
+                    thumbnail_path = CASE WHEN ?1 IS NOT NULL AND length(?1) > 0 THEN ?1 ELSE thumbnail_path END,
+                    width = CASE WHEN ?2 > 0 THEN ?2 ELSE width END,
+                    height = CASE WHEN ?3 > 0 THEN ?3 ELSE height END,
+                    file_size = CASE WHEN ?4 > 0 THEN ?4 ELSE file_size END
+                 WHERE id = ?5",
+            )?;
+
+            for photo in photos {
+                stmt.execute(params![
+                    photo.thumbnail_path,
+                    photo.width,
+                    photo.height,
+                    photo.file_size,
+                    photo.id,
+                ])?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn clear_missing_thumbnails(&self, photo_ids: &[String]) -> Result<()> {
+        if photo_ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare("UPDATE photos SET thumbnail_path = NULL WHERE id = ?1")?;
+            for pid in photo_ids {
+                stmt.execute(params![pid])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get_pending_photos_in_folder(&self, folder_id: &str) -> Result<Vec<PhotoRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT p.id, p.folder_id, p.file_path, p.file_name, p.file_size, p.width, p.height, p.date_taken, p.created_at, p.thumbnail_path, p.processing_status, p.histogram_json
              FROM photos p
              LEFT JOIN photo_exif e ON e.photo_id = p.id
-             LEFT JOIN quality_metrics q ON q.photo_id = p.id
              LEFT JOIN ai_predictions a ON a.photo_id = p.id
              WHERE p.folder_id = ?1 AND (
                  p.processing_status != 'completed'
                  OR e.photo_id IS NULL
-                 OR q.photo_id IS NULL
                  OR a.photo_id IS NULL
                  OR p.thumbnail_path IS NULL
-             )",
+                 OR p.histogram_json IS NULL
+             )
+             ORDER BY p.date_taken DESC, p.file_name ASC",
         )?;
 
         let iter = stmt.query_map(params![folder_id], |row| {
@@ -411,13 +531,13 @@ impl AppDatabase {
             "SELECT p.id, p.folder_id, p.file_path, p.file_name, p.file_size, p.width, p.height, p.date_taken, p.created_at, p.thumbnail_path, p.processing_status, p.histogram_json
              FROM photos p
              LEFT JOIN photo_exif e ON e.photo_id = p.id
-             LEFT JOIN quality_metrics q ON q.photo_id = p.id
              LEFT JOIN ai_predictions a ON a.photo_id = p.id
              WHERE p.processing_status != 'completed'
                 OR e.photo_id IS NULL
-                OR q.photo_id IS NULL
                 OR a.photo_id IS NULL
-                OR p.thumbnail_path IS NULL",
+                OR p.thumbnail_path IS NULL
+                OR p.histogram_json IS NULL
+             ORDER BY p.date_taken DESC, p.file_name ASC",
         )?;
 
         let iter = stmt.query_map([], |row| {
@@ -497,11 +617,16 @@ impl AppDatabase {
         }
 
         if let Some(ref ai) = item.ai_prediction {
+            let safe_pick = match ai.predicted_pick.as_str() {
+                "pick" => "pick",
+                "reject" => "reject",
+                _ => "unflagged",
+            };
             tx.execute(
                 "INSERT OR REPLACE INTO ai_predictions (photo_id, provider_type, model_name, predicted_pick, predicted_rating, pick_confidence, rating_confidence, model_snapshot_id, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
-                    ai.photo_id, ai.provider_type, ai.model_name, ai.predicted_pick,
+                    ai.photo_id, ai.provider_type, ai.model_name, safe_pick,
                     ai.predicted_rating, ai.pick_confidence, ai.rating_confidence,
                     ai.model_snapshot_id, ai.updated_at,
                 ],
@@ -589,8 +714,13 @@ impl AppDatabase {
                 }
 
                 if let Some(ref ai) = item.ai_prediction {
+                    let safe_pick = match ai.predicted_pick.as_str() {
+                        "pick" => "pick",
+                        "reject" => "reject",
+                        _ => "unflagged",
+                    };
                     stmt_ai.execute(params![
-                        ai.photo_id, ai.provider_type, ai.model_name, ai.predicted_pick,
+                        ai.photo_id, ai.provider_type, ai.model_name, safe_pick,
                         ai.predicted_rating, ai.pick_confidence, ai.rating_confidence,
                         ai.model_snapshot_id, ai.updated_at,
                     ])?;
@@ -696,8 +826,13 @@ impl AppDatabase {
                     ])?;
                 }
                 if let Some(ref ai) = item.ai_prediction {
+                    let safe_pick = match ai.predicted_pick.as_str() {
+                        "pick" => "pick",
+                        "reject" => "reject",
+                        _ => "unflagged",
+                    };
                     stmt_ai.execute(params![
-                        ai.photo_id, ai.provider_type, ai.model_name, ai.predicted_pick,
+                        ai.photo_id, ai.provider_type, ai.model_name, safe_pick,
                         ai.predicted_rating, ai.pick_confidence, ai.rating_confidence,
                         ai.model_snapshot_id, ai.updated_at,
                     ])?;
@@ -723,7 +858,7 @@ impl AppDatabase {
              LEFT JOIN user_ratings r ON r.photo_id = p.id
              LEFT JOIN quality_metrics q ON q.photo_id = p.id
              LEFT JOIN ai_predictions a ON a.photo_id = p.id
-             WHERE p.folder_id = ?1
+             WHERE p.folder_id = ?1 AND p.file_name NOT LIKE '.%'
              ORDER BY p.date_taken DESC, p.file_name ASC",
         )?;
 
@@ -777,21 +912,7 @@ impl AppDatabase {
                 updated_at: r_updated_at.unwrap_or_else(chrono_now_ms),
             };
 
-            let blur_score: Option<f64> = row.get(24)?;
-            let quality = if let Some(score) = blur_score {
-                let is_black: i32 = row.get(25)?;
-                let is_over: i32 = row.get(26)?;
-                let mean_lum: f64 = row.get(27)?;
-                Some(QualityMetrics {
-                    photo_id: photo_id.clone(),
-                    blur_score: score,
-                    is_black_frame: is_black != 0,
-                    is_overexposed: is_over != 0,
-                    mean_luminance: mean_lum,
-                })
-            } else {
-                None
-            };
+            let quality: Option<QualityMetrics> = None;
 
             let ai_provider: Option<String> = row.get(28)?;
             let ai_prediction = if let Some(provider) = ai_provider {
@@ -835,15 +956,20 @@ impl AppDatabase {
     ) -> Result<UserRating> {
         let conn = self.conn.lock().unwrap();
         let now = chrono_now_ms();
+        let safe_pick = match pick_status {
+            "pick" => "pick",
+            "reject" => "reject",
+            _ => "unflagged",
+        };
         conn.execute(
             "INSERT OR REPLACE INTO user_ratings (photo_id, pick_status, star_rating, is_confirmed, updated_at)
              VALUES (?1, ?2, ?3, 1, ?4)",
-            params![photo_id, pick_status, star_rating, now],
+            params![photo_id, safe_pick, star_rating, now],
         )?;
 
         Ok(UserRating {
             photo_id: photo_id.to_string(),
-            pick_status: pick_status.to_string(),
+            pick_status: safe_pick.to_string(),
             star_rating,
             is_confirmed: true,
             updated_at: now,
@@ -939,11 +1065,16 @@ impl AppDatabase {
     pub fn save_prediction(&self, ai: &AIPrediction) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = chrono_now_ms();
+        let safe_pick = match ai.predicted_pick.as_str() {
+            "pick" => "pick",
+            "reject" => "reject",
+            _ => "unflagged",
+        };
         conn.execute(
             "INSERT OR REPLACE INTO ai_predictions (photo_id, provider_type, model_name, predicted_pick, predicted_rating, pick_confidence, rating_confidence, model_snapshot_id, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                ai.photo_id, ai.provider_type, ai.model_name, ai.predicted_pick,
+                ai.photo_id, ai.provider_type, ai.model_name, safe_pick,
                 ai.predicted_rating, ai.pick_confidence, ai.rating_confidence,
                 ai.model_snapshot_id, now,
             ],

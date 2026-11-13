@@ -57,7 +57,6 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   const photo = selectedPhoto?.photo;
   const exif = selectedPhoto?.exif;
   const rating = selectedPhoto?.userRating;
-  const quality = selectedPhoto?.quality;
   const ai = selectedPhoto?.aiPrediction;
 
   const showGhostStar = shouldShowGhostedStar(rating, ai, confidenceThreshold);
@@ -110,7 +109,7 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
 
       <div className="flex-1 overflow-y-auto p-3 space-y-4">
         {/* RGB Histogram Widget */}
-        <HistogramWidget imagePath={photo ? photo.file_path : null} />
+        <HistogramWidget imagePath={photo ? photo.file_path : null} photoId={photo?.id} />
 
         {/* Selected Photo Summary & Quick Rating */}
         {selectedPhoto ? (
@@ -346,14 +345,6 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                   <span className="text-gray-500">Focal Length:</span>
                   <span>{exif?.focal_length ? `${exif.focal_length}mm` : 'N/A'}</span>
                 </div>
-                {quality && (
-                  <div className="flex justify-between pt-1 border-t border-[#222530]">
-                    <span className="text-gray-500">Blur Var Score:</span>
-                    <span className={quality.blur_score < 50 ? 'text-red-400' : 'text-green-400'}>
-                      {quality.blur_score}
-                    </span>
-                  </div>
-                )}
               </div>
             </div>
           </>

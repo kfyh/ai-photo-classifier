@@ -1,16 +1,16 @@
-use crate::models::{AccuracyLog, AIPrediction, QualityMetrics};
+use crate::models::{AccuracyLog, AIPrediction};
 use rand::Rng;
 
 pub struct LogisticRegressionHead {
     dim: usize,
-    pick_weights: Vec<Vec<f32>>, // 3 classes (0: none, 1: pick, 2: reject) x dim
+    pick_weights: Vec<Vec<f32>>,   // 3 classes (0: none, 1: pick, 2: reject) x dim
     rating_weights: Vec<Vec<f32>>, // 6 classes (0..5 stars) x dim
     is_trained: bool,
 }
 
 impl LogisticRegressionHead {
     pub fn new(embedding_dim: usize) -> Self {
-        let dim = embedding_dim + 3; // +3 for quality metrics
+        let dim = embedding_dim;
         let mut rng = rand::thread_rng();
 
         // 3 classes for Pick head: 0 = none, 1 = pick, 2 = reject
@@ -31,17 +31,16 @@ impl LogisticRegressionHead {
         }
     }
 
-    pub fn build_augmented_vector(embedding: &[f32], quality: Option<&QualityMetrics>) -> Vec<f32> {
-        let mut z = Vec::with_capacity(embedding.len() + 3);
-        z.extend_from_slice(embedding);
-
-        let blur_norm = quality.map(|q| (q.blur_score / 1000.0).min(1.0) as f32).unwrap_or(0.5);
-        let luma_norm = quality.map(|q| (q.mean_luminance / 255.0) as f32).unwrap_or(0.5);
-        let overexposed = quality.map(|q| if q.is_overexposed { 1.0f32 } else { 0.0f32 }).unwrap_or(0.0);
-
-        z.push(blur_norm);
-        z.push(luma_norm);
-        z.push(overexposed);
+    /// Normalizes or pads an embedding slice to match the classifier head dimension
+    /// without injecting objective blur/exposure quality metrics.
+    fn normalize_feature_vector(&self, embedding: &[f32]) -> Vec<f32> {
+        let mut z = Vec::with_capacity(self.dim);
+        if embedding.len() >= self.dim {
+            z.extend_from_slice(&embedding[..self.dim]);
+        } else {
+            z.extend_from_slice(embedding);
+            z.resize(self.dim, 0.0f32);
+        }
         z
     }
 
@@ -51,9 +50,8 @@ impl LogisticRegressionHead {
         provider_type: &str,
         model_name: &str,
         embedding: &[f32],
-        quality: Option<&QualityMetrics>,
     ) -> AIPrediction {
-        let z = Self::build_augmented_vector(embedding, quality);
+        let z = self.normalize_feature_vector(embedding);
 
         // 1. Pick/Reject/None 3-Class Softmax Classifier (0: none, 1: pick, 2: reject)
         let mut pick_scores = [0.0f32; 3];
@@ -138,7 +136,11 @@ impl LogisticRegressionHead {
             predicted_rating: predicted_rating as i32,
             pick_confidence: ((pick_conf * 100.0).round() / 100.0) as f64,
             rating_confidence: ((max_prob * 100.0).round() / 100.0) as f64,
-            model_snapshot_id: if self.is_trained { Some("snapshot_v1".to_string()) } else { None },
+            model_snapshot_id: if self.is_trained {
+                Some("snapshot_v1".to_string())
+            } else {
+                None
+            },
             updated_at: now,
         }
     }
@@ -153,7 +155,7 @@ impl LogisticRegressionHead {
 
         for _epoch in 0..epochs {
             for (_id, pick_status, star_rating, embedding) in samples {
-                let z = Self::build_augmented_vector(embedding, None);
+                let z = self.normalize_feature_vector(embedding);
 
                 // --- Retrain Pick Head (Valid targets: pick = 1, reject = 2, none/unflagged = 0) ---
                 let target_pick = match pick_status.as_str() {
@@ -188,12 +190,13 @@ impl LogisticRegressionHead {
                     let err = prob - target_prob;
 
                     for i in 0..z.len() {
-                        self.pick_weights[c][i] -= lr * (err * z[i] + lambda * self.pick_weights[c][i]);
+                        self.pick_weights[c][i] -=
+                            lr * (err * z[i] + lambda * self.pick_weights[c][i]);
                     }
                 }
 
                 // --- Retrain Rating Head (0..5 stars) ---
-                let target_rating = *star_rating as usize;
+                let target_rating = (*star_rating as usize).min(5);
                 let mut rating_scores = [0.0f32; 6];
                 let mut max_score = f32::NEG_INFINITY;
 
@@ -221,7 +224,8 @@ impl LogisticRegressionHead {
                     let err = prob - target_prob;
 
                     for i in 0..z.len() {
-                        self.rating_weights[c][i] -= lr * (err * z[i] + lambda * self.rating_weights[c][i]);
+                        self.rating_weights[c][i] -=
+                            lr * (err * z[i] + lambda * self.rating_weights[c][i]);
                     }
                 }
             }
@@ -242,7 +246,7 @@ impl LogisticRegressionHead {
         let mut confusion_matrix = vec![vec![0usize; 6]; 6];
 
         for (_id, pick_status, star_rating, embedding) in samples {
-            let z = Self::build_augmented_vector(embedding, None);
+            let z = self.normalize_feature_vector(embedding);
 
             let mut pick_scores = [0.0f32; 3];
             let mut max_pick_score = f32::NEG_INFINITY;

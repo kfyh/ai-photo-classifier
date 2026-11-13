@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { CombinedPhotoData, PickStatus } from '../types';
 import {
   ZoomIn,
@@ -11,9 +11,11 @@ import {
   Loader2,
   HelpCircle,
   Sparkles,
+  SunMedium,
 } from 'lucide-react';
-import { getPhotoSrc } from '../utils/image';
+import { getFullImageSrc, getPhotoSrc, useResolvedThumbnails } from '../utils/image';
 import { StarRating } from './StarRating';
+import { BlinkiesOverlay } from './BlinkiesOverlay';
 import {
   shouldShowAiSuggestion,
   shouldShowGhostedStar,
@@ -39,13 +41,79 @@ export const LoupeView: React.FC<LoupeViewProps> = ({
 }) => {
   const [zoomLevel, setZoomLevel] = useState<number>(1);
   const [showHud, setShowHud] = useState<boolean>(true);
+  // Blinkies (highlight & shadow clipping overlay) is strictly off by default and only user-toggled
+  const [showBlinkies, setShowBlinkies] = useState<boolean>(false);
   const [isLoaded, setIsLoaded] = useState<boolean>(false);
   const [hasError, setHasError] = useState<boolean>(false);
+  const [useThumbFallback, setUseThumbFallback] = useState<boolean>(false);
+  const [currentSrc, setCurrentSrc] = useState<string>('');
+  const imgRef = useRef<HTMLImageElement | null>(null);
+
+  const fallbackAsArray = React.useMemo(
+    () => (useThumbFallback && selectedPhoto ? [selectedPhoto] : []),
+    [useThumbFallback, selectedPhoto]
+  );
+  const thumbVersion = useResolvedThumbnails(fallbackAsArray);
 
   useEffect(() => {
     setIsLoaded(false);
     setHasError(false);
+    setUseThumbFallback(false);
   }, [selectedPhoto?.photo.id]);
+
+  useEffect(() => {
+    if (!selectedPhoto) return;
+    const photo = selectedPhoto.photo;
+    const resolved = useThumbFallback
+      ? getPhotoSrc(photo.thumbnail_path || photo.file_path, photo.id)
+      : getFullImageSrc(photo.file_path);
+    setCurrentSrc(resolved);
+    if (resolved) {
+      setHasError(false);
+    }
+  }, [
+    selectedPhoto?.photo.id,
+    selectedPhoto?.photo.thumbnail_path,
+    selectedPhoto?.photo.file_path,
+    useThumbFallback,
+    thumbVersion,
+  ]);
+
+  // Loupe View Keyboard Shortcuts: Z (Zoom), I (HUD Info), B (Blinkies Clipping Overlay)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+      const key = e.key.toUpperCase();
+      if (key === 'Z') {
+        e.preventDefault();
+        setZoomLevel(prev => (prev === 1 ? 2.5 : 1));
+      } else if (key === 'I') {
+        e.preventDefault();
+        setShowHud(prev => !prev);
+      } else if (key === 'B') {
+        e.preventDefault();
+        setShowBlinkies(prev => !prev);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  const activePhotoSrc = selectedPhoto
+    ? currentSrc ||
+      (useThumbFallback
+        ? getPhotoSrc(selectedPhoto.photo.thumbnail_path || selectedPhoto.photo.file_path, selectedPhoto.photo.id)
+        : getFullImageSrc(selectedPhoto.photo.file_path))
+    : '';
+
+  useEffect(() => {
+    if (imgRef.current && imgRef.current.complete && imgRef.current.naturalWidth > 0) {
+      setIsLoaded(true);
+    }
+  }, [activePhotoSrc]);
 
   if (!selectedPhoto) {
     return (
@@ -68,12 +136,6 @@ export const LoupeView: React.FC<LoupeViewProps> = ({
     setZoomLevel(prev => (prev === 1 ? 2.5 : 1));
   };
 
-  const [currentSrc, setCurrentSrc] = useState<string>('');
-
-  useEffect(() => {
-    setCurrentSrc(getPhotoSrc(photo.thumbnail_path || photo.file_path));
-  }, [photo.id, photo.thumbnail_path, photo.file_path]);
-
   return (
     <div className="flex-1 relative bg-[#0d0e11] flex items-center justify-center overflow-hidden group select-none">
       {/* Navigation Arrow Buttons */}
@@ -93,49 +155,63 @@ export const LoupeView: React.FC<LoupeViewProps> = ({
         <ChevronRight className="w-6 h-6" />
       </button>
 
-      {/* Main Image Container with Loader / Error Fallback */}
+      {/* Main Image Container with Loader / Error Fallback & Optional Blinkies Overlay */}
       <div
         className="w-full h-full flex items-center justify-center cursor-zoom-in overflow-auto p-4 relative"
         onClick={toggleZoom}
       >
-        {!isLoaded && !hasError && (
+        {(!isLoaded || !activePhotoSrc) && !hasError && (
           <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-400 gap-2 z-10 bg-[#0d0e11]/80">
             <Loader2 className="w-8 h-8 animate-spin text-amber-400" />
-            <span className="text-xs">Loading preview...</span>
+            <span className="text-xs">
+              {useThumbFallback ? 'Loading preview...' : 'Loading full-resolution image...'}
+            </span>
           </div>
         )}
 
         {hasError ? (
           <div className="flex flex-col items-center justify-center text-gray-500 gap-2 p-8 text-center border border-[#2a2d3a] rounded-2xl bg-[#141519]">
             <HelpCircle className="w-12 h-12 text-amber-400 opacity-60" />
-            <span className="text-sm font-semibold text-gray-300">Preview Pending</span>
+            <span className="text-sm font-semibold text-gray-300">Preview Unavailable</span>
             <span className="text-xs text-gray-500">
-              Image thumbnail is being prepared in the background...
+              Unable to load full-resolution image or preview for this file.
             </span>
           </div>
-        ) : (
-          <img
-            src={currentSrc || getPhotoSrc(photo.thumbnail_path || photo.file_path)}
-            alt={photo.file_name}
-            onLoad={() => setIsLoaded(true)}
-            onError={() => {
-              if (photo.file_path && currentSrc !== getPhotoSrc(photo.file_path)) {
-                setCurrentSrc(getPhotoSrc(photo.file_path));
-              } else if (photo.thumbnail_path && currentSrc !== getPhotoSrc(photo.thumbnail_path)) {
-                setCurrentSrc(getPhotoSrc(photo.thumbnail_path));
-              } else {
-                setHasError(true);
-              }
-            }}
-            className={`transition-transform duration-200 object-contain max-w-full max-h-full shadow-2xl select-none ${
-              !isLoaded ? 'opacity-0' : 'opacity-100'
-            }`}
-            style={{
-              transform: `scale(${zoomLevel})`,
-              transformOrigin: 'center center',
-            }}
-          />
-        )}
+        ) : activePhotoSrc ? (
+          <div className="relative w-full h-full flex items-center justify-center overflow-hidden">
+            <img
+              key={`${photo.id}:${activePhotoSrc}`}
+              ref={imgRef}
+              src={activePhotoSrc}
+              alt={photo.file_name}
+              onLoad={() => setIsLoaded(true)}
+              onError={() => {
+                if (!useThumbFallback) {
+                  setUseThumbFallback(true);
+                  setIsLoaded(false);
+                } else {
+                  setHasError(true);
+                }
+              }}
+              className={`transition-transform duration-200 object-contain w-full h-full shadow-2xl select-none ${
+                !isLoaded ? 'opacity-0' : 'opacity-100'
+              }`}
+              style={{
+                transform: `scale(${zoomLevel})`,
+                transformOrigin: 'center center',
+              }}
+            />
+
+            <BlinkiesOverlay
+              enabled={showBlinkies}
+              imgElement={imgRef.current}
+              imageLoaded={isLoaded}
+              imageKey={`${photo.id}:${activePhotoSrc}`}
+              zoomLevel={zoomLevel}
+              className="absolute inset-0 w-full h-full object-contain transition-transform duration-200"
+            />
+          </div>
+        ) : null}
       </div>
 
       {/* Top Floating Controls Bar */}
@@ -152,12 +228,42 @@ export const LoupeView: React.FC<LoupeViewProps> = ({
 
         <button
           onClick={() => setShowHud(prev => !prev)}
-          className={`flex items-center gap-1.5 transition ${showHud ? 'text-amber-400 font-medium' : 'text-gray-400 hover:text-white'}`}
+          className={`flex items-center gap-1.5 transition ${
+            showHud ? 'text-amber-400 font-medium' : 'text-gray-400 hover:text-white'
+          }`}
         >
           <Info className="w-4 h-4" />
           <span>HUD Info (I)</span>
         </button>
+
+        <span className="text-gray-600">|</span>
+
+        <button
+          onClick={() => setShowBlinkies(prev => !prev)}
+          title="Toggle Highlight & Shadow Clipping Warning Overlay (B)"
+          className={`flex items-center gap-1.5 transition ${
+            showBlinkies ? 'text-rose-400 font-semibold' : 'text-gray-400 hover:text-white'
+          }`}
+        >
+          <SunMedium className="w-4 h-4" />
+          <span>Blinkies (B)</span>
+        </button>
       </div>
+
+      {/* Blinkies Legend Indicator when active */}
+      {showBlinkies && (
+        <div className="absolute top-14 left-1/2 -translate-x-1/2 bg-black/80 backdrop-blur-md px-3 py-1 rounded-full border border-white/10 flex items-center gap-3 text-[10px] font-mono text-gray-300 z-20 pointer-events-none">
+          <span className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-[#ff145a] inline-block" />
+            <span>Clipped Highlights (≥250)</span>
+          </span>
+          <span className="text-gray-600">•</span>
+          <span className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-[#00d7ff] inline-block" />
+            <span>Crushed Shadows (≤5)</span>
+          </span>
+        </div>
+      )}
 
       {/* EXIF Overlay HUD Box (Toggled via I key) */}
       {showHud && exif && (

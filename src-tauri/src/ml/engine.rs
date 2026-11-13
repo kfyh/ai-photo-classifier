@@ -3,7 +3,7 @@ use crate::ml::classifier::LogisticRegressionHead;
 use crate::ml::cloud_adapter::CloudVisionAdapter;
 use crate::ml::onnx_adapter::LocalOnnxAdapter;
 use crate::ml::traits::FeatureExtractorAdapter;
-use crate::models::{AccuracyLog, AIPrediction, MLModelOption, QualityMetrics};
+use crate::models::{AccuracyLog, AIPrediction, MLModelOption};
 
 pub fn get_available_ml_models() -> Vec<MLModelOption> {
     vec![
@@ -121,7 +121,6 @@ impl MLEngine {
         db: &AppDatabase,
         photo_id: &str,
         file_path: &str,
-        quality: Option<&QualityMetrics>,
     ) -> Vec<f32> {
         if let Ok(Some(existing)) = db.get_embedding(
             photo_id,
@@ -131,9 +130,19 @@ impl MLEngine {
             return existing;
         }
 
+        // Prefer extracting embedding from cached 400px thumbnail if available on disk
+        let cache_thumb = AppDatabase::get_app_dir()
+            .join("cache")
+            .join(format!("{}_thumb.webp", photo_id));
+        let source_path = if cache_thumb.exists() {
+            cache_thumb.to_string_lossy().to_string()
+        } else {
+            file_path.to_string()
+        };
+
         let embedding = self
             .adapter
-            .extract_embedding(file_path, quality)
+            .extract_embedding(&source_path)
             .unwrap_or_else(|_| vec![0.0f32; self.active_model.embedding_dim]);
 
         let _ = db.save_embedding(
@@ -152,15 +161,13 @@ impl MLEngine {
         db: &AppDatabase,
         photo_id: &str,
         file_path: &str,
-        quality: Option<&QualityMetrics>,
     ) -> AIPrediction {
-        let embedding = self.get_or_create_embedding(db, photo_id, file_path, quality);
+        let embedding = self.get_or_create_embedding(db, photo_id, file_path);
         let prediction = self.classifier.predict(
             photo_id,
             &self.active_model.provider_type,
             &self.active_model.id,
             &embedding,
-            quality,
         );
         let _ = db.save_prediction(&prediction);
         prediction
