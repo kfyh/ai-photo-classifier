@@ -67,12 +67,13 @@ This document outlines the current performance bottlenecks and architectural pit
 
 ---
 
-## 3. Recommended Future Architecture Directions
+## 3. Architecture Status & Future Directions
 
-1. **Tiered Image Pyramid (Multi-Resolution Caching)**:
-   * **Stage 1 (Grid)**: Fast 400px WebP thumbnail ($\sim 15\text{ KB}$ disk, instant).
-   * **Stage 2 (Loupe / Compare Preview)**: High-quality 2048px (2K/QHD) WebP preview ($\sim 200\text{--}400\text{ KB}$ disk, $\sim 8\text{ MB}$ RAM). Provides retina-sharp full-screen rendering with near-instant arrow key navigation.
-   * **Stage 3 (100% Zoom / Pixel Peeping)**: Load and decode the original full-resolution RAW/JPEG only on explicit 100% zoom toggle (`Z` key), discarding it immediately when zooming back out.
+1. **Tiered Image Pyramid (`Partially Implemented`)**:
+   * **Stage 1 (Grid Fast Path — Implemented)**: Fast 400px JPEG thumbnail (`_thumb.jpg`, instant via `get_thumbnails_batch`).
+   * **Stage 2 (Grid Slot-Matched Progressive Upgrade — Implemented)**: Progressive JPEG thumbnail sized to match each grid slot's physical pixel dimensions (`_thumb_<slot_px>.jpg` via `get_sized_thumbnails_batch`, pre-decoded off-screen and layered without flash).
+   * **Stage 3 (Loupe Full-Resolution — Implemented)**: `LoupeView.tsx` loads the actual source file via `getFullImageSrc` (`convertFileSrc`), falling back to the cached thumbnail only for formats the browser cannot natively decode (e.g., RAW/TIFF).
+   * **Future Enhancement**: Optional intermediate 2K preview tier for Loupe/Compare rapid cycling before 100% zoom (`Z` key).
 
 2. **Lightweight Grid Summaries (Projection Queries)**:
    * Define a minimal `PhotoSummary` type for the Grid View:
@@ -80,14 +81,15 @@ This document outlines the current performance bottlenecks and architectural pit
    * Strip `histogram_json`, `photo_exif`, and raw embeddings from grid queries.
    * Fetch heavy metadata on-demand via `getPhotoDetails(photoId)` only when a photo is selected.
 
-3. **Full Windowed Virtualization**:
-   * Implement strict row/grid virtualization (e.g. `react-window` or virtual masonry) to ensure only visible cards ($\sim 20\text{--}40$ items) exist in the DOM at any given instant.
+3. **Windowed Virtualization (`Implemented`)**:
+   * `GridView.tsx` implements 2D row virtualization with `OVERSCAN_ROWS = 4`, `PREFETCH_EXTRA_ROWS = 3`, `overflowAnchor: 'none'`, and GPU-composited `transform: translateY(...)` positioning inside a fixed-height `relative` wrapper.
+   * `Filmstrip.tsx` implements horizontal windowing with left/right spacers.
 
 4. **Paginated / Cursor-Based SQLite Fetching**:
    * Load photos in chunks (e.g. 200 items per page/batch) as the user scrolls, avoiding upfront multi-thousand array allocations.
 
-5. **Throttled Batch IPC Pipeline**:
-   * Maintain a bounded worker queue in Rust (e.g. 4–8 concurrent threads max) and emit progress in consolidated batches every $100\text{ms}$ or $48\text{ items}$.
+5. **Throttled Batch IPC Pipeline (`Implemented`)**:
+   * Single-worker throttled background loop in Rust (`WorkerControlState`) emits consolidated `import-progress` batches merged via an $O(1)$ `Map` in `App.tsx`, while `useResolvedThumbnails` runs non-cancelling debounced batches (`get_thumbnails_batch`, `get_sized_thumbnails_batch`).
 
 6. **Normalized Client-Side State Cache**:
    * Transition from a flat array `photos[]` to an ID-indexed map (`entities: { [id: string]: PhotoSummary }`) or lightweight state store for $O(1)$ rating updates and multi-select mutations.
